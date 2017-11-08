@@ -2603,6 +2603,8 @@ def compact(text):
                     bullet = '%d. ' % listCount[i - 1] if n == '#' else '- '
                     page.append('{0:{1}s}'.format(bullet, len(listLevel)) + line)
                 elif options.toHTML:
+                    if n not in listItem: 
+                        n = '*'
                     page.append(listItem[n] % line)
         elif len(listLevel):
             if options.toHTML:
