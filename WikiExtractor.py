@@ -189,6 +189,10 @@ options = SimpleNamespace(
     # Elements to ignore/discard
 
     ignored_tag_patterns = [],
+    filter_category_include = set(),
+    filter_category_exclude = set(),
+
+    log_file = None,
 
     discardElements = [
         'gallery', 'timeline', 'noinclude', 'pre',
@@ -209,15 +213,28 @@ templateKeys = set(['10', '828'])
 filter_disambig_page_pattern = re.compile("{{disambig(uation)?(\|[^}]*)?}}|__DISAMBIG__")
 
 ##
+g_page_total = 0
+g_page_articl_total=0
+g_page_articl_used_total=0
 # page filtering logic -- remove templates, undesired xml namespaces, and disambiguation pages
-def keepPage(ns, page):
+def keepPage(ns, catSet, page):
+    global g_page_articl_total,g_page_total,g_page_articl_used_total
+    g_page_total += 1
     if ns != '0':               # Aritcle
         return False
     # remove disambig pages if desired
+    g_page_articl_total += 1
     if options.filter_disambig_pages:
         for line in page:
             if filter_disambig_page_pattern.match(line):
                 return False
+    if len(options.filter_category_include) > 0 and len(options.filter_category_include & catSet)==0:
+        logging.debug("***No include  " + str(catSet))
+        return False
+    if len(options.filter_category_exclude) > 0 and len(options.filter_category_exclude & catSet)>0:
+        logging.debug("***Exclude  " + str(catSet))
+        return False
+    g_page_articl_used_total += 1
     return True
 
 
@@ -629,6 +646,8 @@ class Extractor(object):
         text = self.transform(text)
         text = self.wiki2text(text)
         text = compact(self.clean(text))
+        # from zwChan
+        text = [title_str] + text
 
         if sum(len(line) for line in text) < options.min_text_length:
             return
@@ -2717,7 +2736,8 @@ class OutputSplitter(object):
 
 tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*?>(?:([^<]*)(<.*?>)?)?')
 #                    1     2               3      4
-keyRE = re.compile(r'key="([+-]?)(\d*)"')
+keyRE = re.compile(r'key="(\d*)"')
+catRE = re.compile(r'\[\[Category:([^\|]+).*\]\].*')  # capture the category name [[Category:Category name|Sortkey]]"
 
 def load_templates(file, output_file=None):
     """
@@ -2730,7 +2750,7 @@ def load_templates(file, output_file=None):
     if output_file:
         output = codecs.open(output_file, 'wb', 'utf-8')
     for page_count, page_data in enumerate(pages_from(file)):
-        id, revid, title, ns, page = page_data
+        id, revid, title, ns,catSet, page = page_data
         if not output_file and (not options.templateNamespace or
                                 not options.moduleNamespace):  # do not know it yet
             # reconstruct templateNamespace and moduleNamespace from the first title
@@ -2784,6 +2804,11 @@ def pages_from(input):
         if '<' not in line:  # faster than doing re.search()
             if inText:
                 page.append(line)
+                # extract categories
+                if line.lstrip().startswith('[[Category:'):
+                    mCat = catRE.search(line)
+                    if mCat:
+                        catSet.add(mCat.group(1))
             continue
         m = tagRE.search(line)
         if not m:
@@ -2791,6 +2816,7 @@ def pages_from(input):
         tag = m.group(2)
         if tag == 'page':
             page = []
+            catSet = set()
             redirect = False
         elif tag == 'id' and not id:
             id = m.group(3)
@@ -2819,7 +2845,7 @@ def pages_from(input):
             page.append(line)
         elif tag == '/page':
             if id != last_id and not redirect:
-                yield (id, revid, title, ns, page)
+                yield (id, revid, title, ns,catSet, page)
                 last_id = id
                 ns = '0'
             id = None
@@ -2939,8 +2965,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # Mapper process
     page_num = 0
     for page_data in pages_from(input):
-        id, revid, title, ns, page = page_data
-        if keepPage(ns, page):
+        id, revid, title, ns, catSet, page = page_data
+        if keepPage(ns, catSet, page):
             # slow down
             delay = 0
             if spool_length.value > max_spool_length:
@@ -2973,6 +2999,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     extract_rate = page_num / extract_duration
     logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
                  process_count, page_num, extract_duration, extract_rate)
+    logging.info("total of page: %d, total of articl page: %d; total of used articl page: %d" % (g_page_total, g_page_articl_total,g_page_articl_used_total))
 
 
 # ----------------------------------------------------------------------
@@ -2989,7 +3016,7 @@ def extract_process(opts, i, jobs_queue, output_queue):
     global options
     options = opts
 
-    createLogger(options.quiet, options.debug)
+    createLogger(options.quiet, options.debug, options.log_file)
 
     out = StringIO()                 # memory buffer
 
@@ -3031,7 +3058,7 @@ def reduce_process(opts, output_queue, spool_length,
     global options
     options = opts
 
-    createLogger(options.quiet, options.debug)
+    createLogger(options.quiet, options.debug, options.log_file)
 
     if out_file:
         nextFile = NextFile(out_file)
@@ -3137,10 +3164,14 @@ def main():
                         help="print debug info")
     groupS.add_argument("-a", "--article", action="store_true",
                         help="analyze a file containing a single article (debug option)")
+    groupS.add_argument("--log_file",
+                        help="path to save the log info")
     groupS.add_argument("-v", "--version", action="version",
                         version='%(prog)s ' + version,
                         help="print program version")
-
+    groupP.add_argument("--filter_category",
+                        help="specify the file that listing the Categories you want to include or exclude. One line for"
+                             " one category. starting with: 1) '#' comment, ignored; 2) '^' exclude; Note: excluding has higher priority than including")
     args = parser.parse_args()
 
     options.keepLinks = args.links
@@ -3192,8 +3223,8 @@ def main():
 
     options.quiet = args.quiet
     options.debug = args.debug
-
-    createLogger(options.quiet, options.debug)
+    options.log_file = args.log_file
+    createLogger(options.quiet, options.debug, options.log_file)
 
     input_file = args.input
 
@@ -3212,7 +3243,7 @@ def main():
 
         file = fileinput.FileInput(input_file, openhook=fileinput.hook_compressed)
         for page_data in pages_from(file):
-            id, revid, title, ns, page = page_data
+            id, revid, title, ns,catSet, page = page_data
             Extractor(id, revid, title, page).extract(sys.stdout)
         file.close()
         return
@@ -3225,15 +3256,41 @@ def main():
             logging.error('Could not create: %s', output_path)
             return
 
+    filter_category = args.filter_category
+    if (filter_category != None and len(filter_category)>0):
+        with open(filter_category) as f:
+            error_cnt = 0
+            for line in f.readlines():
+                try:
+                    line = str(line.strip())
+                    if line.startswith('#') or len(line) == 0:
+                        continue;
+                    elif line.startswith('^'):
+                        options.filter_category_exclude.add(line.lstrip('^'))
+                    else:
+                        options.filter_category_include.add(line)
+                except Exception as e:
+                    error_cnt += 1
+                    print(u"Category not in utf8, ignored. error cnt %d:\t%s" % (error_cnt,e))
+                    print(line)
+            logging.info("Excluding categories:",)
+            logging.info(str(options.filter_category_exclude))
+            logging.info("Including categories:")
+            logging.info(str(len(options.filter_category_include)))
+
     process_dump(input_file, args.templates, output_path, file_size,
                  args.compress, args.processes)
 
-def createLogger(quiet, debug):
+def createLogger(quiet, debug, log_file):
     logger = logging.getLogger()
     if not quiet:
         logger.setLevel(logging.INFO)
     if debug:
         logger.setLevel(logging.DEBUG)
+    #print (log_file)
+    if log_file:
+        fileHandler = logging.FileHandler(log_file)
+        logger.addHandler(fileHandler)
 
 if __name__ == '__main__':
     main()
