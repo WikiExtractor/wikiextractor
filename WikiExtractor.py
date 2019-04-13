@@ -81,7 +81,7 @@ if PY2:
     range = xrange  # Use Python 3 equivalent
     chr = unichr    # Use Python 3 equivalent
     text_type = unicode
-    
+
     class SimpleNamespace(object):
         def __init__ (self, **kwargs):
             self.__dict__.update(kwargs)
@@ -138,11 +138,11 @@ options = SimpleNamespace(
     ##
     # Filter disambiguation pages
     filter_disambig_pages = False,
-    
+
     ##
     # Drop tables from the article
     keep_tables = False,
-    
+
     ##
     # Whether to preserve links in output
     keepLinks = False,
@@ -162,7 +162,7 @@ options = SimpleNamespace(
     ##
     # Whether to write json instead of the xml-like default output format
     write_json = False,
-    
+
     ##
     # Whether to expand templates
     expand_templates = True,
@@ -178,18 +178,18 @@ options = SimpleNamespace(
     ##
     # Minimum expanded text length required to print document
     min_text_length = 0,
-    
+
     # Shared objects holding templates, redirects and cache
     templates = {},
     redirects = {},
     # cache of parser templates
     # FIXME: sharing this with a Manager slows down.
     templateCache = {},
-    
+
     # Elements to ignore/discard
-    
+
     ignored_tag_patterns = [],
-    
+
     discardElements = [
         'gallery', 'timeline', 'noinclude', 'pre',
         'table', 'tr', 'td', 'th', 'caption', 'div',
@@ -206,7 +206,7 @@ templateKeys = set(['10', '828'])
 
 ##
 # Regex for identifying disambig pages
-filter_disambig_page_pattern = re.compile("{{disambig(uation)?(\|[^}]*)?}}")
+filter_disambig_page_pattern = re.compile("{{disambig(uation)?(\|[^}]*)?}}|__DISAMBIG__")
 
 ##
 # page filtering logic -- remove templates, undesired xml namespaces, and disambiguation pages
@@ -582,7 +582,7 @@ class Extractor(object):
         :param out: a memory file.
         """
         logging.info('%s\t%s', self.id, self.title)
-        
+
         # Separate header from text with a newline.
         if options.toHTML:
             title_str = '<h1>' + self.title + '</h1>'
@@ -629,13 +629,12 @@ class Extractor(object):
         text = self.transform(text)
         text = self.wiki2text(text)
         text = compact(self.clean(text))
-        text = [title_str] + text
-        
+
         if sum(len(line) for line in text) < options.min_text_length:
             return
-        
+
         self.write_output(out, text)
-        
+
         errs = (self.template_title_errs,
                 self.recursion_exceeded_1_errs,
                 self.recursion_exceeded_2_errs,
@@ -2596,11 +2595,11 @@ def compact(text):
                         # emit open sections
                         items = sorted(headers.items())
                         for _, v in items:
-                            page.append(v)
+                            page.append("Section::::" + v)
                     headers.clear()
                     # use item count for #-lines
                     listCount[i - 1] += 1
-                    bullet = '%d. ' % listCount[i - 1] if n == '#' else '- '
+                    bullet = 'BULLET::::%d. ' % listCount[i - 1] if n == '#' else 'BULLET::::- '
                     page.append('{0:{1}s}'.format(bullet, len(listLevel)) + line)
                 elif options.toHTML:
                     page.append(listItem[n] % line)
@@ -2622,7 +2621,7 @@ def compact(text):
             if options.keepSections:
                 items = sorted(headers.items())
                 for i, v in items:
-                    page.append(v)
+                    page.append("Section::::" + v)
             headers.clear()
             page.append(line)  # first line
             emptySection = False
@@ -2716,7 +2715,7 @@ class OutputSplitter(object):
 
 tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*?>(?:([^<]*)(<.*?>)?)?')
 #                    1     2               3      4
-keyRE = re.compile(r'key="(\d*)"')
+keyRE = re.compile(r'key="([+-]?)(\d*)"')
 
 def load_templates(file, output_file=None):
     """
@@ -2859,7 +2858,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         elif tag == 'namespace':
             mk = keyRE.search(line)
             if mk:
-                nsid = mk.group(1)
+                nsid = ''.join(mk.groups())
             else:
                 nsid = ''
             options.knownNamespaces[m.group(3)] = nsid
@@ -2991,8 +2990,8 @@ def extract_process(opts, i, jobs_queue, output_queue):
     createLogger(options.quiet, options.debug)
 
     out = StringIO()                 # memory buffer
-    
-    
+
+
     while True:
         job = jobs_queue.get()  # job is (id, title, page, page_num)
         if job:
@@ -3029,9 +3028,9 @@ def reduce_process(opts, output_queue, spool_length,
 
     global options
     options = opts
-    
+
     createLogger(options.quiet, options.debug)
-    
+
     if out_file:
         nextFile = NextFile(out_file)
         output = OutputSplitter(nextFile, file_size, file_compress)
@@ -3191,7 +3190,7 @@ def main():
 
     options.quiet = args.quiet
     options.debug = args.debug
-    
+
     createLogger(options.quiet, options.debug)
 
     input_file = args.input
