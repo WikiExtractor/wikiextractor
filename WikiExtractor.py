@@ -3139,7 +3139,7 @@ def main():
                         help="accepted namespaces in links")
     groupP.add_argument("--templates",
                         help="use or create file containing templates")
-    groupP.add_argument("--no-templates", action="store_false",
+    groupP.add_argument("--no_templates", action="store_false",
                         help="Do not expand templates")
     groupP.add_argument("-r", "--revision", action="store_true", default=options.print_revision,
                         help="Include the document revision id (default=%(default)s)")
