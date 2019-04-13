@@ -1,3 +1,6 @@
+local/
+tmp/
+
 ### https://raw.github.com/github/gitignore/c699a4f4684e9e294c9c550f820ca330f019b6f9/python.gitignore
 
 # Byte-compiled / optimized / DLL files
@@ -85,3 +88,6 @@ ENV/
 
 # Spyder project settings
 .spyderproject
+
+# Editor files
+*.idea

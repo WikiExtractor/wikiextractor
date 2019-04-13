@@ -37,9 +37,11 @@ Each file will contains several documents in this [document format](http://media
                             [-l] [-s] [--lists] [-ns ns1,ns2]
                             [--templates TEMPLATES] [--no-templates] [-r]
                             [--min_text_length MIN_TEXT_LENGTH]
+                            [--filter_category path_of_categories_file]
                             [--filter_disambig_pages] [-it abbr,b,big]
                             [-de gallery,timeline,noinclude] [--keep_tables]
                             [--processes PROCESSES] [-q] [--debug] [-a] [-v]
+                            [--log_file]
                             input
 
     Wikipedia Extractor:
@@ -91,6 +93,18 @@ Each file will contains several documents in this [document format](http://media
       --min_text_length MIN_TEXT_LENGTH
                             Minimum expanded text length required to write
                             document (default=0)
+      --filter_category path_of_categories_file
+                            Include or exclude specific categories from the dataset. Specify the categories in
+                            file 'path_of_categories_file'. Format:
+                            One category one line, and if the line starts with:
+                                1) #: Comments, ignored;
+                                2) ^: the categories will be in excluding-categories
+                                3) others: the categories will be in including-categories.
+                            Priority:
+                                1) If excluding-categories is not empty, and any category of a page exists in excluding-categories, the page will be excluded; else
+                                2) If including-categories is not empty, and no category of a page exists in including-categories, the page will be excluded; else
+                                3) the page will be included
+
       --filter_disambig_pages
                             Remove pages from output that contain disabmiguation
                             markup (default=False)
@@ -109,6 +123,7 @@ Each file will contains several documents in this [document format](http://media
       -a, --article         analyze a file containing a single article (debug
                             option)
       -v, --version         print program version
+      --log_file            specify a file to save the log information.
 
 
 Saving templates to a file will speed up performing extraction the next time,

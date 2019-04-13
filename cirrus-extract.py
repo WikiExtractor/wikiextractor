@@ -28,7 +28,7 @@ Extracts and cleans text from a Wikipedia Cirrus dump and stores output in a
 number of files of similar size in a given directory.
 Each file will contain several documents in the format:
 
-	<doc id="" url="" title="">
+	<doc id="" url="" title="" language="" revision="">
         ...
         </doc>
 
@@ -124,7 +124,7 @@ class Extractor(object):
         logging.debug("%s\t%s", self.id, self.title)
         text = ''.join(self.page)
         url = get_url(self.id)
-        header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, url, self.title)
+        header = '<doc id="%s" url="%s" title="%s" language="%s" revision="%s">\n' % (self.id, url, self.title, self.language, self.revision)
         # Separate header from text with a newline.
         header += self.title + '\n\n'
         header = header.encode('utf-8')
@@ -169,14 +169,16 @@ def process_dump(input_file, out_file, file_size, file_compress):
         content = json.loads(input.readline())
         type = index['index']['_type']
         id = index['index']['_id']
-        if type == 'page' and content.get('namespace') == 0:
+        language = content['language']
+        revision = content['version']
+        if type == 'page' and content['namespace'] == 0:
             title = content['title']
             text = content['text']
             # drop references:
             # ^ The Penguin Dictionary
             text = re.sub(r'  \^ .*', '', text)
             url = urlbase + 'wiki?curid=' + id
-            header = '<doc id="%s" url="%s" title="%s">\n' % (id, url, title)
+            header = '<doc id="%s" url="%s" title="%s" language="%s" revision="%s">\n' % (id, url, title, language, revision)
             page = header + title + '\n\n' + text + '\n</doc>\n'
             output.write(page.encode('utf-8'))
 
