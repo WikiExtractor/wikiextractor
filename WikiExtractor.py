@@ -2820,7 +2820,7 @@ def pages_from(input):
             redirect = False
         elif tag == 'id' and not id:
             id = m.group(3)
-        elif tag == 'id' and id:
+        elif tag == 'id' and not revid:
             revid = m.group(3)
         elif tag == 'title':
             title = m.group(3)
