@@ -808,7 +808,7 @@ class Extractor(object):
             text = text.replace('|-', '')
             text = text.replace('|', '')
         if options.toHTML:
-            text = cgi.escape(text)
+            text = html.escape(text)
         return text
 
 
