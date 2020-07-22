@@ -135,4 +135,4 @@ of expanding [MediaWiki templates](https://www.mediawiki.org/wiki/Help:Templates
 For further information, visit [the documentation](http://attardi.github.io/wikiextractor).
 
 ## License
-The code is made. available under the [GNU Affero General Public License v3.0](LICENSE). 
+The code is made available under the [GNU Affero General Public License v3.0](LICENSE). 
