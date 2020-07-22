@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 # =============================================================================
@@ -14,6 +14,7 @@
 #   Pedro Assis (pedroh2306@gmail.com)
 #   Wim Muskee (wimmuskee@gmail.com)
 #   Radics Geza (radicsge@gmail.com)
+#   Nick Ulven (nulven@github)
 #
 # =============================================================================
 #  Copyright (c) 2009-2020. Giuseppe Attardi (attardi@di.unipi.it).
