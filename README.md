@@ -59,7 +59,7 @@ Each file will contains several documents in this [document format](http://media
 
         {"id": "", "revid": "", "url":"", "title": "", "text": "..."}
 
-    Template expansion requires preprocesssng first the whole dump and
+    Template expansion requires preprocessing first the whole dump and
     collecting template definitions.
 
     positional arguments:
