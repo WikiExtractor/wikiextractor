@@ -11,15 +11,15 @@
 #  This file is part of Tanl.
 #
 #  Tanl is free software; you can redistribute it and/or modify it
-#  under the terms of the GNU General Public License, version 3,
+#  under the terms of the GNU Affero General Public License, version 3,
 #  as published by the Free Software Foundation.
 #
 #  Tanl is distributed in the hope that it will be useful,
 #  but WITHOUT ANY WARRANTY; without even the implied warranty of
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#  GNU General Public License for more details.
+#  GNU Affero General Public License for more details.
 #
-#  You should have received a copy of the GNU General Public License
+#  You should have received a copy of the GNU Affero General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 # =============================================================================
 
@@ -43,7 +43,7 @@ import gzip
 import logging
 
 # Program version
-version = '1.00'
+version = '3.0'
 
 urlbase = 'http://it.wikipedia.org/'
 
