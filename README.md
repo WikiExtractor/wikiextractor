@@ -1,7 +1,7 @@
 # WikiExtractor
 [WikiExtractor.py](http://medialab.di.unipi.it/wiki/Wikipedia_Extractor) is a Python script that extracts and cleans text from a [Wikipedia database dump](http://download.wikimedia.org/).
 
-The tool is written in Python and requires Python 3.7 but no additional library.
+The tool is written in Python and requires Python 3 but no additional library.
 **Warning**: problems have been reported on Windows due to poor support for `StringIO` in the Python implementation on Windows.
 
 For further information, see the [project Home Page](http://medialab.di.unipi.it/wiki/Wikipedia_Extractor) or the [Wiki](https://github.com/attardi/wikiextractor/wiki).
@@ -25,14 +25,27 @@ In order to speed up processing:
 
 ## Installation
 
-The script may be invoked directly, however it can be installed by doing:
+The script may be invoked directly:
+
+    python -m wikiextractor.Wikiextractor
+
+however it can also be installed from `PyPi` by doing:
+
+    pip install wikiextractor
+
+or locally with:
 
     (sudo) python setup.py install
 
 ## Usage
-The script is invoked with a Wikipedia dump file as an argument.
+
+### Wikiextractor
+The script is invoked with a Wikipedia dump file as an argument:
+
+    python -m wikiextractor.Wikiextractor <Wikipedia dump file>
+
 The output is stored in several files of similar size in a given directory.
-Each file will contains several documents in this [document format](http://medialab.di.unipi.it/wiki/Document_Format).
+Each file will contains several documents in this [document format](wiki/File-Format).
 
     usage: WikiExtractor.py [-h] [-o OUTPUT] [-b n[KMG]] [-c] [--json] [--html]
                             [-l] [-s] [--lists] [-ns ns1,ns2]
@@ -135,5 +148,58 @@ of expanding [MediaWiki templates](https://www.mediawiki.org/wiki/Help:Templates
 
 For further information, visit [the documentation](http://attardi.github.io/wikiextractor).
 
+### Cirrus Extractor
+
+~~~
+usage: cirrus-extract.py [-h] [-o OUTPUT] [-b n[KMG]] [-c] [-ns ns1,ns2] [-q]
+                         [-v]
+                         input
+
+Wikipedia Cirrus Extractor:
+Extracts and cleans text from a Wikipedia Cirrus dump and stores output in a
+number of files of similar size in a given directory.
+Each file will contain several documents in the format:
+
+	<doc id="" url="" title="" language="" revision="">
+        ...
+        </doc>
+
+positional arguments:
+  input                 Cirrus Json wiki dump file
+
+optional arguments:
+  -h, --help            show this help message and exit
+
+Output:
+  -o OUTPUT, --output OUTPUT
+                        directory for extracted files (or '-' for dumping to
+                        stdin)
+  -b n[KMG], --bytes n[KMG]
+                        maximum bytes per output file (default 1M)
+  -c, --compress        compress output files using bzip
+
+Processing:
+  -ns ns1,ns2, --namespaces ns1,ns2
+                        accepted namespaces
+
+Special:
+  -q, --quiet           suppress reporting progress info
+  -v, --version         print program version
+~~~
+
 ## License
 The code is made available under the [GNU Affero General Public License v3.0](LICENSE). 
+
+## Reference
+If you find this code useful, please refer it in publications as:
+
+~~~
+@misc{Wikiextractor2015,
+  author = {Giusepppe Attardi},
+  title = {WikiExtractor},
+  year = {2015},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/attardi/wikiextractor}}
+}
+~~~
