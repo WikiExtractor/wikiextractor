@@ -27,7 +27,7 @@ In order to speed up processing:
 
 The script may be invoked directly:
 
-    python -m wikiextractor.Wikiextractor
+    python -m wikiextractor.WikiExtractor
 
 however it can also be installed from `PyPi` by doing:
 
@@ -42,7 +42,7 @@ or locally with:
 ### Wikiextractor
 The script is invoked with a Wikipedia dump file as an argument:
 
-    python -m wikiextractor.Wikiextractor <Wikipedia dump file>
+    python -m wikiextractor.WikiExtractor <Wikipedia dump file>
 
 The output is stored in several files of similar size in a given directory.
 Each file will contains several documents in this [document format](wiki/File-Format).
