@@ -28,14 +28,9 @@ Extracts a single page from a Wikipedia dump file.
 """
 
 import sys, os.path
-import re, random
+import re
 import argparse
-from itertools import izip
-import logging, traceback
-import urllib
-import bz2, gzip
-from htmlentitydefs import name2codepoint
-import Queue, threading, multiprocessing
+import bz2
 
 
 # Program version
@@ -63,7 +58,6 @@ def process_data(input_file, id, templates=False):
 
     page = []
     for line in input:
-        line = line.decode('utf-8')
         if '<' not in line:         # faster than doing re.search()
             if page:
                 page.append(line)
@@ -94,7 +88,7 @@ def process_data(input_file, id, templates=False):
         elif tag == '/page':
             if page:
                 page.append(line)
-                print ''.join(page).encode('utf-8')
+                print(''.join(page))
                 if not templates:
                     break
             page = []

@@ -64,7 +64,7 @@ from .extract import Extractor, ignoreTag, define_template
 # ===========================================================================
 
 # Program version
-version = '3.0'
+__version__ = '3.0.1'
 
 ##
 # Defined in <siteinfo>
@@ -531,7 +531,7 @@ def main():
     groupS.add_argument("-a", "--article", action="store_true",
                         help="analyze a file containing a single article (debug option)")
     groupS.add_argument("-v", "--version", action="version",
-                        version='%(prog)s ' + version,
+                        version='%(prog)s ' + __version__,
                         help="print program version")
 
     args = parser.parse_args()

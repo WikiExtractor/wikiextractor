@@ -37,6 +37,11 @@ or locally with:
 
     (sudo) python setup.py install
 
+The installer also installs two scripts for direct invocation:
+
+    wikiextractor  	(equivalent to python -m wikiextractor.WikiExtractor)
+    extractPage		(to extract a single page from a dump)
+
 ## Usage
 
 ### Wikiextractor
@@ -185,6 +190,25 @@ Processing:
 Special:
   -q, --quiet           suppress reporting progress info
   -v, --version         print program version
+~~~
+
+### extractPage
+Extract a single page from a Wikipedia dump file.
+
+~~~
+usage: extractPage [-h] [--id ID] [--template] [-v] input
+
+Wikipedia Page Extractor:
+Extracts a single page from a Wikipedia dump file.
+
+positional arguments:
+  input          XML wiki dump file
+
+optional arguments:
+  -h, --help     show this help message and exit
+  --id ID        article number
+  --template     template number
+  -v, --version  print program version
 ~~~
 
 ## License
