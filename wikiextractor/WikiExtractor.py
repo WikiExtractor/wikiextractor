@@ -49,7 +49,6 @@ collecting template definitions.
 
 import argparse
 import bz2
-import codecs
 import fileinput
 import logging
 import os.path
@@ -198,10 +197,11 @@ def load_templates(file, output_file=None):
     global moduleNamespace, modulePrefix
     modulePrefix = moduleNamespace + ':'
     articles = 0
+    templates = 0
     page = []
     inText = False
     if output_file:
-        output = codecs.open(output_file, 'wb', 'utf-8')
+        output = open(output_file, 'wb')
     for line in file:
         line = line.decode('utf-8')
         if '<' not in line:  # faster than doing re.search()
@@ -249,13 +249,14 @@ def load_templates(file, output_file=None):
                     output.write(line)
                 output.write('   </text>\n')
                 output.write('</page>\n')
+                templates += 1
             page = []
             articles += 1
             if articles % 100000 == 0:
                 logging.info("Preprocessed %d pages", articles)
     if output_file:
         output.close()
-        logging.info("Saved %d templates to '%s'", len(templates), output_file)
+        logging.info("Saved %d templates to '%s'", templates, output_file)
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
