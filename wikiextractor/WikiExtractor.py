@@ -58,12 +58,12 @@ from io import StringIO
 from multiprocessing import Queue, Process, cpu_count
 from timeit import default_timer
 
-from .extract import Extractor, ignoreTag, define_template
+from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
 
 # ===========================================================================
 
 # Program version
-__version__ = '3.0.2'
+__version__ = '3.0.3'
 
 ##
 # Defined in <siteinfo>
@@ -136,7 +136,7 @@ class NextFile(object):
 
     def _dirname(self):
         char1 = self.dir_index % 26
-        char2 = self.dir_index / 26 % 26
+        char2 = int(self.dir_index / 26) % 26
         return os.path.join(self.path_name, '%c%c' % (ord('A') + char2, ord('A') + char1))
 
     def _filepath(self):
@@ -201,7 +201,7 @@ def load_templates(file, output_file=None):
     page = []
     inText = False
     if output_file:
-        output = open(output_file, 'wb')
+        output = open(output_file, 'w')
     for line in file:
         line = line.decode('utf-8')
         if '<' not in line:  # faster than doing re.search()
@@ -352,7 +352,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # start worker processes
     logging.info("Using %d extract processes.", process_count)
     workers = []
-    for _ in xrange(max(1, process_count)):
+    for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
                             args=(jobs_queue, output_queue))
         extractor.daemon = True  # only live while parent process lives

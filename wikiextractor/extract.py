@@ -19,7 +19,7 @@
 # =============================================================================
 
 import re
-import cgi
+import html
 from itertools import zip_longest
 import urllib
 from html.entities import name2codepoint
@@ -63,7 +63,7 @@ acceptedNamespaces = ['w', 'wiktionary', 'wikt']
 
 
 def get_url(uid):
-    return "%s?curid=%s" % (options.urlbase, uid)
+    return "%s?curid=%s" % (urlbase, uid)
 
 
 # ======================================================================
@@ -170,7 +170,7 @@ def clean(extractor, text, expand_templates=False, escape_doc=True):
     text = re.sub(r'\n\W+?\n', '\n', text, flags=re.U)  # lines with only punctuations
     text = text.replace(',,', ',').replace(',.', '.')
     if escape_doc:
-        text = cgi.escape(text)
+        text = html.escape(text)
     return text
 
 
@@ -212,9 +212,7 @@ def compact(text, mark_headers=False):
 
             headers[lev] = title
             # drop previous headers
-            for i in headers.keys():
-                if i > lev:
-                    del headers[i]
+            headers = { k:v for k,v in headers.items() if k > lev }
             emptySection = True
             continue
         # Handle page title
@@ -268,8 +266,7 @@ def compact(text, mark_headers=False):
             continue
         elif len(headers):
             if Extractor.keepSections:
-                items = headers.items()
-                items.sort()
+                items = sorted(headers.items())
                 for (i, v) in items:
                     page.append(v)
             headers.clear()
@@ -497,7 +494,7 @@ def makeInternalLink(title, label):
         if colon2 > 1 and title[colon + 1:colon2] not in acceptedNamespaces:
             return ''
     if Extractor.keepLinks:
-        return '<a href="%s">%s</a>' % (urllib.quote(title.encode('utf-8')), label)
+        return '<a href="%s">%s</a>' % (urllib.quote(title), label)
     else:
         return label
 
@@ -860,14 +857,13 @@ class Extractor(object):
         header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, url, self.title)
         # Separate header from text with a newline.
         header += self.title + '\n\n'
-        header = header.encode('utf-8')
         footer = "\n</doc>\n"
         out.write(header)
 
         text = self.clean_text(text)
 
         for line in text:
-            out.write(line.encode('utf-8'))
+            out.write(line)
             out.write('\n')
         out.write(footer)
         errs = (self.template_title_errs,
