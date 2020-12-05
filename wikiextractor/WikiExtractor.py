@@ -62,7 +62,7 @@ from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
 # ===========================================================================
 
 # Program version
-__version__ = '3.0.3'
+__version__ = '3.0.4'
 
 ##
 # Defined in <siteinfo>
@@ -266,7 +266,7 @@ def decode_open(filename, mode='rt', encoding='utf-8'):
     ext = os.path.splitext(filename)[1]
     if ext == '.gz':
         import gzip
-        return gzip.open(filename, mode)
+        return gzip.open(filename, mode, encoding=encoding)
     elif ext == '.bz2':
         return bz2.open(filename, mode=mode, encoding=encoding)
     else:

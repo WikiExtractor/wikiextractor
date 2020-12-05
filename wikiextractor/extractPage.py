@@ -34,7 +34,7 @@ import bz2
 
 
 # Program version
-__version__ = '3.0.3'
+__version__ = '3.0.4'
 
 # ----------------------------------------------------------------------
 # READER
@@ -49,13 +49,14 @@ def process_data(input_file, id, templates=False):
     :param id: article id
     """
 
-    opener = bz2.BZ2File if input_file.lower().endswith("bz2") else open
-
-    input = opener(input_file)
+    if input_file.lower().endswith(".bz2"):
+        input = bz2.open(input_file, mode='rt', encoding='utf-8')
+    else:
+        input = open(input_file)
 
     page = []
     for line in input:
-        line = line.decode('utf-8')
+        line = line
         if '<' not in line:         # faster than doing re.search()
             if page:
                 page.append(line)
