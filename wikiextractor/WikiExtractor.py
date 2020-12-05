@@ -63,7 +63,7 @@ from .extract import Extractor, ignoreTag, define_template
 # ===========================================================================
 
 # Program version
-__version__ = '3.0.1'
+__version__ = '3.0.2'
 
 ##
 # Defined in <siteinfo>
@@ -257,6 +257,7 @@ def load_templates(file, output_file=None):
     if output_file:
         output.close()
         logging.info("Saved %d templates to '%s'", templates, output_file)
+    return templates
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
@@ -308,18 +309,18 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         if template_file and os.path.exists(template_file):
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
             file = fileinput.FileInput(template_file, openhook=fileinput.hook_compressed)
-            load_templates(file)
+            templates = load_templates(file)
             file.close()
         else:
             if input_file == '-':
                 # can't scan then reset stdin; must error w/ suggestion to specify template_file
                 raise ValueError("to use templates with stdin dump, must supply explicit template-file")
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
-            load_templates(input, template_file)
+            templates = load_templates(input, template_file)
             input.close()
             input = fileinput.FileInput(input_file, openhook=fileinput.hook_compressed)
         template_load_elapsed = default_timer() - template_load_start
-        logging.info("Loaded %d templates in %.1fs", len(templates), template_load_elapsed)
+        logging.info("Loaded %d templates in %.1fs", templates, template_load_elapsed)
 
     if out_file == '-':
         output = sys.stdout
