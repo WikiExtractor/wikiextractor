@@ -49,7 +49,6 @@ collecting template definitions.
 
 import argparse
 import bz2
-import fileinput
 import logging
 import os.path
 import re  # TODO use regex when it will be standard
@@ -112,7 +111,7 @@ modules = {
 # Output
 
 
-class NextFile(object):
+class NextFile():
 
     """
     Synchronous generation of next available file name.
@@ -143,7 +142,7 @@ class NextFile(object):
         return '%s/wiki_%02d' % (self._dirname(), self.file_index)
 
 
-class OutputSplitter(object):
+class OutputSplitter():
 
     """
     File-like object, that splits output to multiple files of a given max size.
@@ -203,7 +202,7 @@ def load_templates(file, output_file=None):
     if output_file:
         output = open(output_file, 'w')
     for line in file:
-        line = line.decode('utf-8')
+        #line = line.decode('utf-8')
         if '<' not in line:  # faster than doing re.search()
             if inText:
                 page.append(line)
@@ -238,18 +237,18 @@ def load_templates(file, output_file=None):
             # FIXME: should reconstruct also moduleNamespace
             if title.startswith(templatePrefix):
                 define_template(title, page)
+                templates += 1
             # save templates and modules to file
             if output_file and (title.startswith(templatePrefix) or
                                 title.startswith(modulePrefix)):
                 output.write('<page>\n')
-                output.write('   <title>%s</title>\n' % title)
+                output.write('   <title>%s</title>\n' % title.encode('utf-8'))
                 output.write('   <ns>10</ns>\n')
                 output.write('   <text>')
                 for line in page:
-                    output.write(line)
+                    output.write(line.encode('utf-8'))
                 output.write('   </text>\n')
                 output.write('</page>\n')
-                templates += 1
             page = []
             articles += 1
             if articles % 100000 == 0:
@@ -258,6 +257,20 @@ def load_templates(file, output_file=None):
         output.close()
         logging.info("Saved %d templates to '%s'", templates, output_file)
     return templates
+
+
+def decode_open(filename, mode='rt', encoding='utf-8'):
+    """
+    Open a file, decode and decompress, depending on extension `gz`, or 'bz2`.
+    """
+    ext = os.path.splitext(filename)[1]
+    if ext == '.gz':
+        import gzip
+        return gzip.open(filename, mode)
+    elif ext == '.bz2':
+        return bz2.open(filename, mode=mode, encoding=encoding)
+    else:
+        return open(filename, mode, encoding=encoding)
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
@@ -275,14 +288,11 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     global templateNamespace, templatePrefix
     global moduleNamespace, modulePrefix
 
-    if input_file == '-':
-        input = sys.stdin
-    else:
-        input = fileinput.FileInput(input_file, openhook=fileinput.hook_compressed)
+    input = decode_open(input_file)
 
     # collect siteinfo
     for line in input:
-        line = line.decode('utf-8')
+        line = line #.decode('utf-8')
         m = tagRE.search(line)
         if not m:
             continue
@@ -308,7 +318,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         template_load_start = default_timer()
         if template_file and os.path.exists(template_file):
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
-            file = fileinput.FileInput(template_file, openhook=fileinput.hook_compressed)
+            file = decode_open(template_file)
             templates = load_templates(file)
             file.close()
         else:
@@ -318,7 +328,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
             templates = load_templates(input, template_file)
             input.close()
-            input = fileinput.FileInput(input_file, openhook=fileinput.hook_compressed)
+            input = decode_open(input_file)
         template_load_elapsed = default_timer() - template_load_start
         logging.info("Loaded %d templates in %.1fs", templates, template_load_elapsed)
 
@@ -370,7 +380,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     inText = False
     redirect = False
     for line in input:
-        line = line.decode('utf-8')
+        #line = line.decode('utf-8')
         if '<' not in line:  # faster than doing re.search()
             if inText:
                 page.append(line)
@@ -402,8 +412,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             page.append(line)
         elif tag == '/page':
             colon = title.find(':')
-            if (colon < 0 or title[:colon] in acceptedNamespaces) and id != last_id and \
-                    not redirect and not title.startswith(templateNamespace):
+            if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
+                    not redirect and not title.startswith(templateNamespace)):
                 job = (id, title, page, ordinal)
                 jobs_queue.put(job)  # goes to any available extract_process
                 last_id = id
@@ -539,7 +549,7 @@ def main():
     args = parser.parse_args()
 
     Extractor.keepLinks = args.links
-    Extractor.toHTML = args.html
+    Extractor.HtmlFormatting = args.html
     if args.html:
         Extractor.keepLinks = True
 
@@ -583,7 +593,7 @@ def main():
                     load_templates(file)
 
         with open(input_file) as file:
-            page = file.read().decode('utf-8')
+            page = file.read()#.decode('utf-8')
             m = re.search(r'<id>(.*)</id>', page)
             id = m.group(1) if m else 0
             m = re.search(r'<title>(.*)</title>', page)

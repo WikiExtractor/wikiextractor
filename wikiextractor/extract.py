@@ -73,6 +73,11 @@ def clean(extractor, text, expand_templates=False, escape_doc=True):
     """
     Transforms wiki markup. If the command line flag --escapedoc is set then the text is also escaped
     @see https://www.mediawiki.org/wiki/Help:Formatting
+    :param extractor: the Extractor t use.
+    :param text: the text to clean.
+    :param expand_templates: whether to perform template expansion.
+    :param escape_doc: whether to convert special characters to HTML entities.
+    @return: the cleaned text.
     """
 
     if expand_templates:
@@ -107,7 +112,7 @@ def clean(extractor, text, expand_templates=False, escape_doc=True):
     text = res + unescape(text[cur:])
 
     # Handle bold/italic/quote
-    if extractor.toHTML:
+    if extractor.HtmlFormatting:
         text = bold_italic.sub(r'<b>\1</b>', text)
         text = bold.sub(r'<b>\1</b>', text)
         text = italic.sub(r'<i>\1</i>', text)
@@ -146,7 +151,7 @@ def clean(extractor, text, expand_templates=False, escape_doc=True):
     for tag in discardElements:
         text = dropNested(text, r'<\s*%s\b[^>/]*>' % tag, r'<\s*/\s*%s>' % tag)
 
-    if not extractor.toHTML:
+    if not extractor.HtmlFormatting:
         # Turn into text what is left (&amp;nbsp;) and <syntaxhighlight>
         text = unescape(text)
 
@@ -170,7 +175,7 @@ def clean(extractor, text, expand_templates=False, escape_doc=True):
     text = re.sub(r'\n\W+?\n', '\n', text, flags=re.U)  # lines with only punctuations
     text = text.replace(',,', ',').replace(',.', '.')
     if escape_doc:
-        text = html.escape(text)
+        text = html.escape(text, quote=False)
     return text
 
 
@@ -202,7 +207,7 @@ def compact(text, mark_headers=False):
         if m:
             title = m.group(2)
             lev = len(m.group(1))
-            if Extractor.toHTML:
+            if Extractor.HtmlFormatting:
                 page.append("<h%d>%s</h%d>" % (lev, title, lev))
             if title and title[-1] not in '!?':
                 title += '.'
@@ -212,7 +217,7 @@ def compact(text, mark_headers=False):
 
             headers[lev] = title
             # drop previous headers
-            headers = { k:v for k,v in headers.items() if k > lev }
+            headers = { k:v for k,v in headers.items() if k <= lev }
             emptySection = True
             continue
         # Handle page title
@@ -228,7 +233,7 @@ def compact(text, mark_headers=False):
             continue
         # handle lists
         elif line[0] in '*#;:':
-            if Extractor.toHTML:
+            if Extractor.HtmlFormatting:
                 i = 0
                 for c, n in zip_longest(listLevel, line, fillvalue=''):
                     if not n or n not in '*#;:':
@@ -280,13 +285,6 @@ def compact(text, mark_headers=False):
             #     continue
 
     return page
-
-
-def handle_unicode(entity):
-    numeric_code = int(entity[2:-1])
-    if numeric_code >= 0x10000:
-        return ''
-    return unichr(numeric_code)
 
 
 # ----------------------------------------------------------------------
@@ -503,7 +501,7 @@ def makeInternalLink(title, label):
 # variables
 
 
-class MagicWords(object):
+class MagicWords():
 
     """
     One copy in each Extractor.
@@ -726,11 +724,11 @@ def unescape(text):
         try:
             if text[1] == "#":  # character reference
                 if text[2] == "x":
-                    return unichr(int(code[1:], 16))
+                    return chr(int(code[1:], 16))
                 else:
-                    return unichr(int(code))
+                    return chr(int(code))
             else:  # named entity
-                return unichr(name2codepoint[code])
+                return chr(name2codepoint[code])
         except:
             return text  # leave as is
 
@@ -795,8 +793,7 @@ dots = re.compile(r'\.{4,}')
 substWords = 'subst:|safesubst:'
 
 
-class Extractor(object):
-
+class Extractor():
     """
     An extraction task on a article.
     """
@@ -809,8 +806,8 @@ class Extractor(object):
     keepSections = True
 
     ##
-    # Whether to output HTML instead of text
-    toHTML = False
+    # Whether to output text with HTML formatting elements in <doc> files.
+    HtmlFormatting = False
 
     def __init__(self, id, title, page):
         """
@@ -846,7 +843,7 @@ class Extractor(object):
         text = compact(text, mark_headers=mark_headers)
         return text
 
-    def extract(self, out):
+    def extract(self, out, escape_doc=True):
         """
         :param out: a memory file.
         """
@@ -860,7 +857,7 @@ class Extractor(object):
         footer = "\n</doc>\n"
         out.write(header)
 
-        text = self.clean_text(text)
+        text = self.clean_text(text, escape_doc=escape_doc)
 
         for line in text:
             out.write(line)
@@ -1443,7 +1440,7 @@ def normalizeNamespace(ns):
 # https://github.com/Wikia/app/blob/dev/extensions/ParserFunctions/ParserFunctions_body.php
 
 
-class Infix:
+class Infix():
 
     """Infix operators.
     The calling sequence for the infix is:

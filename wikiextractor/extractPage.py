@@ -34,7 +34,7 @@ import bz2
 
 
 # Program version
-version = '3.0'
+__version__ = '3.0.3'
 
 # ----------------------------------------------------------------------
 # READER
@@ -49,15 +49,13 @@ def process_data(input_file, id, templates=False):
     :param id: article id
     """
 
-    if input_file.lower().endswith("bz2"):
-        opener = bz2.BZ2File
-    else:
-        opener = open
+    opener = bz2.BZ2File if input_file.lower().endswith("bz2") else open
 
     input = opener(input_file)
 
     page = []
     for line in input:
+        line = line.decode('utf-8')
         if '<' not in line:         # faster than doing re.search()
             if page:
                 page.append(line)
@@ -103,7 +101,7 @@ def main():
                                      description=__doc__)
     parser.add_argument("input",
                         help="XML wiki dump file")
-    parser.add_argument("--id", default="",
+    parser.add_argument("--id", default="1",
                         help="article number")
     parser.add_argument("--template", action="store_true",
                         help="template number")
