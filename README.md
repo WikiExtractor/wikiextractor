@@ -47,7 +47,9 @@ The installer also installs two scripts for direct invocation:
 ### Wikiextractor
 The script is invoked with a Wikipedia dump file as an argument:
 
-    python -m wikiextractor.WikiExtractor <Wikipedia dump file>
+    python -m wikiextractor.WikiExtractor <Wikipedia dump file> [--templates <extracted template file>]
+
+The option `--templates` extracts the templates to a local file, which can be reloaded to reduce the time to perform extraction.
 
 The output is stored in several files of similar size in a given directory.
 Each file will contains several documents in this [document format](https://github.com/attardi/wikiextractor/wiki/File-Format).

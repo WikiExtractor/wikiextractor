@@ -274,7 +274,7 @@ def decode_open(filename, mode='rt', encoding='utf-8'):
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count):
+                 process_count, escape_doc):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -364,7 +364,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue))
+                            args=(jobs_queue, output_queue, escape_doc))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
@@ -447,7 +447,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue):
+def extract_process(jobs_queue, output_queue, escape_doc):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
@@ -456,7 +456,7 @@ def extract_process(jobs_queue, output_queue):
         job = jobs_queue.get()  # job is (id, title, page, ordinal)
         if job:
             out = StringIO()  # memory buffer
-            Extractor(*job[:3]).extract(out)  # (id, title, page)
+            Extractor(*job[:3]).extract(out, escape_doc)  # (id, title, page)
             text = out.getvalue()
             output_queue.put((job[3], text))  # (ordinal, extracted_text)
             out.close()
@@ -502,7 +502,7 @@ minFileSize = 200 * 1024
 
 def main():
     global urlbase, acceptedNamespaces
-    global expand_templates, templateCache, escape_doc
+    global expand_templates, templateCache
 
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -529,8 +529,8 @@ def main():
                         help="use or create file containing templates")
     groupP.add_argument("--no-templates", action="store_false",
                         help="Do not expand templates")
-    groupP.add_argument("--escapedoc", action="store_true",
-                        help="use to escape the contents of the output <doc>...</doc>")
+    groupP.add_argument("--escape-doc", default=True,
+                        help="use to produce proper HTML in the output <doc>...</doc>")
     default_process_count = cpu_count() - 1
     parser.add_argument("--processes", type=int, default=default_process_count,
                         help="Number of processes to use (default %(default)s)")
@@ -554,7 +554,6 @@ def main():
         Extractor.keepLinks = True
 
     expand_templates = args.no_templates
-    escape_doc = args.escapedoc
 
     try:
         power = 'kmg'.find(args.bytes[-1].lower()) + 1
@@ -614,7 +613,7 @@ def main():
             return
 
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes)
+                 args.compress, args.processes, args.escape_doc)
 
 
 if __name__ == '__main__':
