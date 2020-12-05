@@ -4,7 +4,7 @@
 The tool is written in Python and requires Python 3 but no additional library.
 **Warning**: problems have been reported on Windows due to poor support for `StringIO` in the Python implementation on Windows.
 
-For further information, see the [project Home Page](http://medialab.di.unipi.it/wiki/Wikipedia_Extractor) or the [Wiki](https://github.com/attardi/wikiextractor/wiki).
+For further information, see the [Wiki](https://github.com/attardi/wikiextractor/wiki).
 
 # Wikipedia Cirrus Extractor
 
@@ -50,7 +50,7 @@ The script is invoked with a Wikipedia dump file as an argument:
     python -m wikiextractor.WikiExtractor <Wikipedia dump file>
 
 The output is stored in several files of similar size in a given directory.
-Each file will contains several documents in this [document format](wiki/File-Format).
+Each file will contains several documents in this [document format](https://github.com/attardi/wikiextractor/wiki/File-Format).
 
     usage: WikiExtractor.py [-h] [-o OUTPUT] [-b n[KMG]] [-c] [--json] [--html]
                             [-l] [-s] [--lists] [-ns ns1,ns2]
