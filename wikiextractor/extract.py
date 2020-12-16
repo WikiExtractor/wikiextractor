@@ -21,7 +21,7 @@
 import re
 import html
 from itertools import zip_longest
-import urllib
+import urllib.parse.quote as urlquote
 from html.entities import name2codepoint
 import logging
 import time
@@ -422,7 +422,7 @@ def replaceExternalLinks(text):
 def makeExternalLink(url, anchor):
     """Function applied to wikiLinks"""
     if Extractor.keepLinks:
-        return '<a href="%s">%s</a>' % (urllib.quote(url.encode('utf-8')), anchor)
+        return '<a href="%s">%s</a>' % (urlquote(url.encode('utf-8')), anchor)
     else:
         return anchor
 
@@ -492,7 +492,7 @@ def makeInternalLink(title, label):
         if colon2 > 1 and title[colon + 1:colon2] not in acceptedNamespaces:
             return ''
     if Extractor.keepLinks:
-        return '<a href="%s">%s</a>' % (urllib.quote(title), label)
+        return '<a href="%s">%s</a>' % (urlquote(title), label)
     else:
         return label
 
@@ -1615,7 +1615,7 @@ parserFunctions = {
 
     # This function is used in some pages to construct links
     # http://meta.wikimedia.org/wiki/Help:URL
-    'urlencode': lambda string, *rest: urllib.quote(string.encode('utf-8')),
+    'urlencode': lambda string, *rest: urlquote(string.encode('utf-8')),
 
     'lc': lambda string, *rest: string.lower() if string else '',
 
