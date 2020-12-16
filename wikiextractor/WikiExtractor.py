@@ -62,7 +62,7 @@ from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
 # ===========================================================================
 
 # Program version
-__version__ = '3.0.4'
+__version__ = '3.0.5'
 
 ##
 # Defined in <siteinfo>
@@ -79,10 +79,6 @@ templatePrefix = ''
 # The namespace used for module definitions
 # It is the name associated with namespace key=828 in the siteinfo header.
 moduleNamespace = ''
-
-# This is obtained from <siteinfo>
-urlbase = ''
-
 
 # ----------------------------------------------------------------------
 # Modules
@@ -283,10 +279,11 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param file_compress: whether to compress files with bzip.
     :param process_count: number of extraction processes to spawn.
     """
-    global urlbase
     global knownNamespaces
     global templateNamespace, templatePrefix
     global moduleNamespace, modulePrefix
+
+    urlbase = ''                # This is obtained from <siteinfo>
 
     input = decode_open(input_file)
 
@@ -414,7 +411,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             colon = title.find(':')
             if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
                     not redirect and not title.startswith(templateNamespace)):
-                job = (id, title, page, ordinal)
+                job = (id, urlbase, title, page, ordinal)
                 jobs_queue.put(job)  # goes to any available extract_process
                 last_id = id
                 ordinal += 1
@@ -451,14 +448,15 @@ def extract_process(jobs_queue, output_queue, escape_doc):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
+    :escape_doc: whether to convert entities in text to HTML.
     """
     while True:
         job = jobs_queue.get()  # job is (id, title, page, ordinal)
         if job:
             out = StringIO()  # memory buffer
-            Extractor(*job[:3]).extract(out, escape_doc)  # (id, title, page)
+            Extractor(*job[:4]).extract(out, escape_doc)  # (id, urlbase, title, page)
             text = out.getvalue()
-            output_queue.put((job[3], text))  # (ordinal, extracted_text)
+            output_queue.put((job[4], text))  # (ordinal, extracted_text)
             out.close()
         else:
             break

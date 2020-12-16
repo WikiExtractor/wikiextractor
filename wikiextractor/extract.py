@@ -21,7 +21,7 @@
 import re
 import html
 from itertools import zip_longest
-import urllib.parse.quote as urlquote
+from urllib.parse import quote as urlquote
 from html.entities import name2codepoint
 import logging
 import time
@@ -33,9 +33,6 @@ tailRE = re.compile('\w+')
 syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlight&gt;', re.DOTALL)
 
 ## PARAMS ####################################################################
-
-# This is obtained from <siteinfo>
-urlbase = ''
 
 ##
 # Defined in <siteinfo>
@@ -62,7 +59,7 @@ discardElements = [
 acceptedNamespaces = ['w', 'wiktionary', 'wikt']
 
 
-def get_url(uid):
+def get_url(urlbase, uid):
     return "%s?curid=%s" % (urlbase, uid)
 
 
@@ -809,11 +806,12 @@ class Extractor():
     # Whether to output text with HTML formatting elements in <doc> files.
     HtmlFormatting = False
 
-    def __init__(self, id, title, page):
+    def __init__(self, id, urlbase, title, page):
         """
         :param page: a list of lines.
         """
         self.id = id
+        self.url = get_url(urlbase, id)
         self.title = title
         self.page = page
         self.magicWords = MagicWords()
@@ -850,8 +848,7 @@ class Extractor():
         logging.debug("%s\t%s", self.id, self.title)
         text = ''.join(self.page)
 
-        url = get_url(self.id)
-        header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, url, self.title)
+        header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, self.url, self.title)
         # Separate header from text with a newline.
         header += self.title + '\n\n'
         footer = "\n</doc>\n"
