@@ -43,7 +43,13 @@ Each file will contain several documents in the format:
         ...
         </doc>
 
-This version performs template expansion by preprocesssng the whole dump and
+If the program is invoked with the --json flag, then each file will                                            
+contain several documents formatted as json ojects, one per line, with                                         
+the following structure
+
+    {"id": "", "revid": "", "url": "", "title": "", "text": "..."}
+
+The program performs template expansion by preprocesssng the whole dump and
 collecting template definitions.
 """
 
@@ -258,6 +264,7 @@ def load_templates(file, output_file=None):
 def decode_open(filename, mode='rt', encoding='utf-8'):
     """
     Open a file, decode and decompress, depending on extension `gz`, or 'bz2`.
+    :param filename: the file to open.
     """
     ext = os.path.splitext(filename)[1]
     if ext == '.gz':
@@ -270,7 +277,7 @@ def decode_open(filename, mode='rt', encoding='utf-8'):
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, escape_doc):
+                 process_count, html_safe):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -361,7 +368,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, escape_doc))
+                            args=(jobs_queue, output_queue, html_safe))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
@@ -371,13 +378,13 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # we collect individual lines, since str.join() is significantly faster
     # than concatenation
     page = []
-    id = None
-    last_id = None
+    id = ''
+    revid = ''
+    last_id = ''
     ordinal = 0  # page count
     inText = False
     redirect = False
     for line in input:
-        #line = line.decode('utf-8')
         if '<' not in line:  # faster than doing re.search()
             if inText:
                 page.append(line)
@@ -391,6 +398,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             redirect = False
         elif tag == 'id' and not id:
             id = m.group(3)
+        elif tag == 'id' and id: # <revision> <id></id> </revision>
+            revid = m.group(3)
         elif tag == 'title':
             title = m.group(3)
         elif tag == 'redirect':
@@ -411,11 +420,12 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             colon = title.find(':')
             if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
                     not redirect and not title.startswith(templateNamespace)):
-                job = (id, urlbase, title, page, ordinal)
+                job = (id, revid, urlbase, title, page, ordinal)
                 jobs_queue.put(job)  # goes to any available extract_process
                 last_id = id
                 ordinal += 1
-            id = None
+            id = ''
+            revid = ''
             page = []
 
     input.close()
@@ -444,19 +454,19 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, escape_doc):
+def extract_process(jobs_queue, output_queue, html_safe):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
-    :escape_doc: whether to convert entities in text to HTML.
+    :html_safe: whether to convert entities in text to HTML.
     """
     while True:
-        job = jobs_queue.get()  # job is (id, title, page, ordinal)
+        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
         if job:
             out = StringIO()  # memory buffer
-            Extractor(*job[:4]).extract(out, escape_doc)  # (id, urlbase, title, page)
+            Extractor(*job[:-1]).extract(out, html_safe)  # (id, urlbase, title, page)
             text = out.getvalue()
-            output_queue.put((job[4], text))  # (ordinal, extracted_text)
+            output_queue.put((job[-1], text))  # (ordinal, extracted_text)
             out.close()
         else:
             break
@@ -515,6 +525,8 @@ def main():
                         metavar="n[KMG]")
     groupO.add_argument("-c", "--compress", action="store_true",
                         help="compress output files using bzip")
+    groupO.add_argument("--json", action="store_true",
+                        help="write output in json format instead of the default <doc> format")
 
     groupP = parser.add_argument_group('Processing')
     groupP.add_argument("--html", action="store_true",
@@ -527,8 +539,8 @@ def main():
                         help="use or create file containing templates")
     groupP.add_argument("--no-templates", action="store_false",
                         help="Do not expand templates")
-    groupP.add_argument("--escape-doc", default=True,
-                        help="use to produce proper HTML in the output <doc>...</doc>")
+    groupP.add_argument("--html-safe", default=True,
+                        help="use to produce HTML safe output within <doc>...</doc>")
     default_process_count = cpu_count() - 1
     parser.add_argument("--processes", type=int, default=default_process_count,
                         help="Number of processes to use (default %(default)s)")
@@ -550,6 +562,7 @@ def main():
     Extractor.HtmlFormatting = args.html
     if args.html:
         Extractor.keepLinks = True
+    Extractor.to_json = args.json
 
     expand_templates = args.no_templates
 
@@ -590,16 +603,23 @@ def main():
                     load_templates(file)
 
         with open(input_file) as file:
-            page = file.read()#.decode('utf-8')
-            m = re.search(r'<id>(.*)</id>', page)
-            id = m.group(1) if m else 0
-            m = re.search(r'<title>(.*)</title>', page)
+            page = file.read()
+            ids = re.findall(r'<id>(\d*?)</id>', page)
+            id = ids[0] if ids else ''
+            revid = ids[1] if len(ids) > 1 else ''
+            m = re.search(r'<title>(.*?)</title>', page)
             if m:
                 title = m.group(1)
             else:
                 logging.error('Missing title element')
                 return
-            Extractor(id, title, [page]).extract(sys.stdout)
+            m = re.search(r'<base>(.*?)</base>', page)
+            if m:
+                base = m.group(1)
+                urlbase = base[:base.rfind("/")]
+            else:
+                urlbase = ''
+            Extractor(id, revid, urlbase, title, [page]).extract(sys.stdout)
         return
 
     output_path = args.output
@@ -611,7 +631,7 @@ def main():
             return
 
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.escape_doc)
+                 args.compress, args.processes, args.html_safe)
 
 
 if __name__ == '__main__':
