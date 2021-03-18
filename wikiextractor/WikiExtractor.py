@@ -169,7 +169,10 @@ class OutputSplitter():
 
     def write(self, data):
         self.reserve(len(data))
-        self.file.write(data)
+        if self.compress:
+            self.file.write(data.encode('utf-8'))
+        else:
+            self.file.write(data)
 
     def close(self):
         self.file.close()
