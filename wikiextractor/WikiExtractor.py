@@ -60,7 +60,7 @@ import os.path
 import re  # TODO use regex when it will be standard
 import sys
 from io import StringIO
-from multiprocessing import Queue, Process, cpu_count
+from multiprocessing import Queue, get_context, cpu_count
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
@@ -103,7 +103,7 @@ modules = {
 
 # def expandTemplates(text):
 #     """Expand templates invoking MediaWiki API"""
-#     text = urlib.urlencodew(text.encode('utf-8'))
+#     text = urlib.urlencodew(text)
 #     base = urlbase[:urlbase.rfind('/')]
 #     url = base + "/w/api.php?action=expandtemplates&format=json&text=" + text
 #     exp = json.loads(urllib.urlopen(url))
@@ -170,7 +170,7 @@ class OutputSplitter():
     def write(self, data):
         self.reserve(len(data))
         if self.compress:
-            self.file.write(data.encode('utf-8'))
+            self.file.write(data)
         else:
             self.file.write(data)
 
@@ -247,11 +247,11 @@ def load_templates(file, output_file=None):
             if output_file and (title.startswith(templatePrefix) or
                                 title.startswith(modulePrefix)):
                 output.write('<page>\n')
-                output.write('   <title>%s</title>\n' % title.encode('utf-8'))
+                output.write('   <title>%s</title>\n' % title)
                 output.write('   <ns>10</ns>\n')
                 output.write('   <text>')
                 for line in page:
-                    output.write(line.encode('utf-8'))
+                    output.write(line)
                 output.write('   </text>\n')
                 output.write('</page>\n')
             page = []
@@ -354,6 +354,9 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # Parallel Map/Reduce:
     # - pages to be processed are dispatched to workers
     # - a reduce process collects the results, sort them and print them.
+
+    # fixes MacOS error: TypeError: cannot pickle '_io.TextIOWrapper' object
+    Process = get_context("fork").Process
 
     maxsize = 10 * process_count
     # output queue
@@ -524,7 +527,7 @@ def main():
     groupO.add_argument("-o", "--output", default="text",
                         help="directory for extracted files (or '-' for dumping to stdout)")
     groupO.add_argument("-b", "--bytes", default="1M",
-                        help="maximum bytes per output file (default %(default)s)",
+                        help="maximum bytes per output file (default %(default)s); 0 means to put a single article per file",
                         metavar="n[KMG]")
     groupO.add_argument("-c", "--compress", action="store_true",
                         help="compress output files using bzip")
@@ -571,8 +574,9 @@ def main():
 
     try:
         power = 'kmg'.find(args.bytes[-1].lower()) + 1
-        file_size = int(args.bytes[:-1]) * 1024 ** power
-        if file_size < minFileSize:
+        # 0 bytes means put a single article per file.
+        file_size = 0 if args.bytes == '0' else int(args.bytes[:-1]) * 1024 ** power
+        if file_size and file_size < minFileSize:
             raise ValueError()
     except ValueError:
         logging.error('Insufficient or invalid size: %s', args.bytes)
