@@ -79,7 +79,6 @@ knownNamespaces = set(['Template'])
 # The namespace used for template definitions
 # It is the name associated with namespace key=10 in the siteinfo header.
 templateNamespace = ''
-templatePrefix = ''
 
 ##
 # The namespace used for module definitions
@@ -196,8 +195,7 @@ def load_templates(file, output_file=None):
     Load templates from :param file:.
     :param output_file: file where to save templates and modules.
     """
-    global templateNamespace, templatePrefix
-    templatePrefix = templateNamespace + ':'
+    global templateNamespace
     global moduleNamespace, modulePrefix
     modulePrefix = moduleNamespace + ':'
     articles = 0
@@ -220,6 +218,13 @@ def load_templates(file, output_file=None):
             page = []
         elif tag == 'title':
             title = m.group(3)
+            if not output_file and not templateNamespace:  # do not know it yet
+                # we reconstruct it from the first title
+                colon = title.find(':')
+                if colon > 1:
+                    templateNamespace = title[:colon]
+                    Extractor.templatePrefix = title[:colon + 1]
+            # FIXME: should reconstruct also moduleNamespace
         elif tag == 'text':
             inText = True
             line = line[m.start(3):m.end(3)]
@@ -233,18 +238,11 @@ def load_templates(file, output_file=None):
         elif inText:
             page.append(line)
         elif tag == '/page':
-            if not output_file and not templateNamespace:  # do not know it yet
-                # we reconstruct it from the first title
-                colon = title.find(':')
-                if colon > 1:
-                    templateNamespace = title[:colon]
-                    templatePrefix = title[:colon + 1]
-            # FIXME: should reconstruct also moduleNamespace
-            if title.startswith(templatePrefix):
+            if title.startswith(Extractor.templatePrefix):
                 define_template(title, page)
                 templates += 1
             # save templates and modules to file
-            if output_file and (title.startswith(templatePrefix) or
+            if output_file and (title.startswith(Extractor.templatePrefix) or
                                 title.startswith(modulePrefix)):
                 output.write('<page>\n')
                 output.write('   <title>%s</title>\n' % title)
@@ -279,6 +277,63 @@ def decode_open(filename, mode='rt', encoding='utf-8'):
         return open(filename, mode, encoding=encoding)
 
 
+def collect_pages(text):
+    """
+    :param text: the text of a wikipedia file dump.
+    """
+    # we collect individual lines, since str.join() is significantly faster
+    # than concatenation
+    page = []
+    id = ''
+    revid = ''
+    last_id = ''
+    inText = False
+    redirect = False
+    for line in text:
+        if '<' not in line:     # faster than doing re.search()
+            if inText:
+                page.append(line)
+            continue
+        m = tagRE.search(line)
+        if not m:
+            continue
+        tag = m.group(2)
+        if tag == 'page':
+            page = []
+            redirect = False
+        elif tag == 'id' and not id:
+            id = m.group(3)
+        elif tag == 'id' and id: # <revision> <id></id> </revision>
+            revid = m.group(3)
+        elif tag == 'title':
+            title = m.group(3)
+        elif tag == 'redirect':
+            redirect = True
+        elif tag == 'text':
+            inText = True
+            line = line[m.start(3):m.end(3)]
+            page.append(line)
+            if m.lastindex == 4:  # open-close
+                inText = False
+        elif tag == '/text':
+            if m.group(1):
+                page.append(m.group(1))
+            inText = False
+        elif inText:
+            page.append(line)
+        elif tag == '/page':
+            colon = title.find(':')
+            if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
+                    not redirect and not title.startswith(templateNamespace)):
+                yield (id, revid, title, page)
+                last_id = id
+            id = ''
+            revid = ''
+            page = []
+            inText = False
+            redirect = False
+
+
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
                  process_count, html_safe):
     """
@@ -290,7 +345,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param process_count: number of extraction processes to spawn.
     """
     global knownNamespaces
-    global templateNamespace, templatePrefix
+    global templateNamespace
     global moduleNamespace, modulePrefix
 
     urlbase = ''                # This is obtained from <siteinfo>
@@ -313,7 +368,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             knownNamespaces.add(m.group(3))
             if re.search('key="10"', line):
                 templateNamespace = m.group(3)
-                templatePrefix = templateNamespace + ':'
+                Extractor.templatePrefix = templateNamespace + ':'
             elif re.search('key="828"', line):
                 moduleNamespace = m.group(3)
                 modulePrefix = moduleNamespace + ':'
@@ -383,56 +438,12 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
     # we collect individual lines, since str.join() is significantly faster
     # than concatenation
-    page = []
-    id = ''
-    revid = ''
-    last_id = ''
+
     ordinal = 0  # page count
-    inText = False
-    redirect = False
-    for line in input:
-        if '<' not in line:  # faster than doing re.search()
-            if inText:
-                page.append(line)
-            continue
-        m = tagRE.search(line)
-        if not m:
-            continue
-        tag = m.group(2)
-        if tag == 'page':
-            page = []
-            redirect = False
-        elif tag == 'id' and not id:
-            id = m.group(3)
-        elif tag == 'id' and id: # <revision> <id></id> </revision>
-            revid = m.group(3)
-        elif tag == 'title':
-            title = m.group(3)
-        elif tag == 'redirect':
-            redirect = True
-        elif tag == 'text':
-            inText = True
-            line = line[m.start(3):m.end(3)]
-            page.append(line)
-            if m.lastindex == 4:  # open-close
-                inText = False
-        elif tag == '/text':
-            if m.group(1):
-                page.append(m.group(1))
-            inText = False
-        elif inText:
-            page.append(line)
-        elif tag == '/page':
-            colon = title.find(':')
-            if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
-                    not redirect and not title.startswith(templateNamespace)):
-                job = (id, revid, urlbase, title, page, ordinal)
-                jobs_queue.put(job)  # goes to any available extract_process
-                last_id = id
-                ordinal += 1
-            id = ''
-            revid = ''
-            page = []
+    for id, revid, title, page in collect_pages(input):
+        job = (id, revid, urlbase, title, page, ordinal)
+        jobs_queue.put(job)  # goes to any available extract_process
+        ordinal += 1
 
     input.close()
 
@@ -467,7 +478,7 @@ def extract_process(jobs_queue, output_queue, html_safe):
     :html_safe: whether to convert entities in text to HTML.
     """
     while True:
-        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
+        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page)
         if job:
             out = StringIO()  # memory buffer
             Extractor(*job[:-1]).extract(out, html_safe)  # (id, urlbase, title, page)
@@ -479,7 +490,8 @@ def extract_process(jobs_queue, output_queue, html_safe):
 
 
 def reduce_process(output_queue, output):
-    """Pull finished article text, write series of files (or stdout)
+    """
+    Pull finished article text, write series of files (or stdout)
     :param output_queue: text to be output.
     :param output: file object where to print.
     """
@@ -515,7 +527,7 @@ minFileSize = 200 * 1024
 
 
 def main():
-    global urlbase, acceptedNamespaces
+    global acceptedNamespaces
     global expand_templates, templateCache
 
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
@@ -609,24 +621,10 @@ def main():
                 with open(args.templates) as file:
                     load_templates(file)
 
-        with open(input_file) as file:
-            page = file.read()
-            ids = re.findall(r'<id>(\d*?)</id>', page)
-            id = ids[0] if ids else ''
-            revid = ids[1] if len(ids) > 1 else ''
-            m = re.search(r'<title>(.*?)</title>', page)
-            if m:
-                title = m.group(1)
-            else:
-                logging.error('Missing title element')
-                return
-            m = re.search(r'<base>(.*?)</base>', page)
-            if m:
-                base = m.group(1)
-                urlbase = base[:base.rfind("/")]
-            else:
-                urlbase = ''
-            Extractor(id, revid, urlbase, title, [page]).extract(sys.stdout)
+        urlbase = ''
+        with open(input_file) as input:
+            for id, revid, title, page in collect_pages(input):
+                Extractor(id, revid, urlbase, title, page).extract(sys.stdout)
         return
 
     output_path = args.output
