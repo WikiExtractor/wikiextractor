@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  Version: 3.0 (July 22, 2020)
+#  Version: 3.0 (January 24, 2023)
 #  Author: Giuseppe Attardi (attardi@di.unipi.it), University of Pisa
 #
 #  Contributors:
@@ -17,7 +17,7 @@
 #   Nick Ulven (nulven@github)
 #
 # =============================================================================
-#  Copyright (c) 2009-2020. Giuseppe Attardi (attardi@di.unipi.it).
+#  Copyright (c) 2009-2023. Giuseppe Attardi (attardi@di.unipi.it).
 # =============================================================================
 #  This file is part of Tanl.
 #
@@ -68,7 +68,7 @@ from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
 # ===========================================================================
 
 # Program version
-__version__ = '3.0.6'
+__version__ = '3.0.7'
 
 ##
 # Defined in <siteinfo>
@@ -194,6 +194,7 @@ def load_templates(file, output_file=None):
     """
     Load templates from :param file:.
     :param output_file: file where to save templates and modules.
+    :return: number of templates loaded.
     """
     global templateNamespace
     global moduleNamespace, modulePrefix
@@ -335,7 +336,7 @@ def collect_pages(text):
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe):
+                 process_count, html_safe, expand_templates=True):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -343,6 +344,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param file_size: max size of each extracted file, or None for no max (one file)
     :param file_compress: whether to compress files with bzip.
     :param process_count: number of extraction processes to spawn.
+    :html_safe: whether to convert entities in text to HTML.
+    :param expand_templates: whether to expand templates.
     """
     global knownNamespaces
     global templateNamespace
@@ -528,7 +531,7 @@ minFileSize = 200 * 1024
 
 def main():
     global acceptedNamespaces
-    global expand_templates, templateCache
+    global templateCache
 
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -555,7 +558,7 @@ def main():
                         help="accepted namespaces")
     groupP.add_argument("--templates",
                         help="use or create file containing templates")
-    groupP.add_argument("--no-templates", action="store_false",
+    groupP.add_argument("--no-templates", action="store_true",
                         help="Do not expand templates")
     groupP.add_argument("--html-safe", default=True,
                         help="use to produce HTML safe output within <doc>...</doc>")
@@ -581,8 +584,6 @@ def main():
     if args.html:
         Extractor.keepLinks = True
     Extractor.to_json = args.json
-
-    expand_templates = args.no_templates
 
     try:
         power = 'kmg'.find(args.bytes[-1].lower()) + 1
@@ -636,8 +637,7 @@ def main():
             return
 
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.html_safe)
-
+                 args.compress, args.processes, args.html_safe, not args.no_templates)
 
 if __name__ == '__main__':
     main()

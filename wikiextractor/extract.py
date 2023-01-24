@@ -26,7 +26,6 @@ from urllib.parse import quote as urlencode
 from html.entities import name2codepoint
 import logging
 import time
-import pdb                      # DEBUG
 
 # ----------------------------------------------------------------------
 
@@ -82,7 +81,6 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     if expand_templates:
         # expand templates
         # See: http://www.mediawiki.org/wiki/Help:Templates
-        pdb.set_trace()         # DEBUG
         text = extractor.expandTemplates(text)
     else:
         # Drop transclusions (template, parser functions)
@@ -830,7 +828,7 @@ class Template(list):
         # {{ppp|q=r|p=q}} gives r, but using Template:tvvv containing
         # "{{{{{{{{{p}}}}}}}}}", {{tvvv|p=q|q=r|r=s}} gives s.
 
-        #logging.debug('subst tpl (%d, %d) %s', len(extractor.frame), depth, self)
+        logging.debug('subst tpl (%d, %d) %s', len(extractor.frame), depth, self)
 
         if depth > extractor.maxParameterRecursionLevels:
             extractor.recursion_exceeded_3_errs += 1
@@ -952,6 +950,7 @@ class Extractor():
           e.g. "## Section 1"
         """
         self.magicWords['namespace'] = self.title[:max(0, self.title.find(":"))]
+        #self.magicWords['namespacenumber'] = '0' # for article, 
         self.magicWords['pagename'] = self.title
         self.magicWords['fullpagename'] = self.title
         self.magicWords['currentyear'] = time.strftime('%Y')
@@ -1008,7 +1007,7 @@ class Extractor():
     # Expand templates
 
     maxTemplateRecursionLevels = 30
-    maxParameterRecursionLevels = 10
+    maxParameterRecursionLevels = 16
 
     # check for template beginning
     reOpen = re.compile('(?<!{){{(?!{)', re.DOTALL)
@@ -1764,6 +1763,8 @@ parserFunctions = {
 
     'int': lambda string, *rest: str(int(string)),
 
+    'padleft': lambda char, width, string: string.ljust(char, int(pad)), # CHECK_ME
+
 }
 
 
@@ -1771,6 +1772,8 @@ def callParserFunction(functionName, args, frame):
     """
     Parser functions have similar syntax as templates, except that
     the first argument is everything after the first colon.
+    :param functionName: nameof the parser function
+    :param args: the arguments to the function
     :return: the result of the invocation, None in case of failure.
 
     http://meta.wikimedia.org/wiki/Help:ParserFunctions
@@ -1780,11 +1783,11 @@ def callParserFunction(functionName, args, frame):
         if functionName == '#invoke':
             # special handling of frame
             ret = sharp_invoke(args[0].strip(), args[1].strip(), frame)
-            # logging.debug('parserFunction> %s %s', functionName, ret)
+            # logging.debug('parserFunction> %s %s', args[1], ret)
             return ret
         if functionName in parserFunctions:
             ret = parserFunctions[functionName](*args)
-            # logging.debug('parserFunction> %s %s', functionName, ret)
+            # logging.debug('parserFunction> %s(%s) %s', functionName, args, ret)
             return ret
     except:
         return ""  # FIXME: fix errors
@@ -1851,6 +1854,6 @@ def define_template(title, page):
         text = reIncludeonly.sub('', text)
 
     if text:
-        if title in templates:
+        if title in templates and templates[title] != text:
             logging.warn('Redefining: %s', title)
         templates[title] = text
