@@ -923,6 +923,8 @@ class Extractor():
     ##
     # Whether to produce json instead of the default <doc> output format.
     to_json = False
+    # Whether to produce text instead of the default <doc> output format.
+    to_text = False
 
     ##
     # Whether or not to discard empty (title only) documents
@@ -994,6 +996,9 @@ class Extractor():
             out_str = json.dumps(json_data)
             out.write(out_str)
             out.write('\n')
+        elif self.to_text:
+            out.write('\n'.join(text))
+            out.write('\n\n\n')
         else:
             header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, self.url, self.title)
             # Separate header from text with a newline.
