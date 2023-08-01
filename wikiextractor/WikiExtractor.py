@@ -548,6 +548,8 @@ def main():
                         help="compress output files using bzip")
     groupO.add_argument("--json", action="store_true",
                         help="write output in json format instead of the default <doc> format")
+    groupO.add_argument("--discard_empty", action="store_true",
+                        help="discard empty articles (such as redirects) rather than writing just the title")
 
     groupP = parser.add_argument_group('Processing')
     groupP.add_argument("--html", action="store_true",
@@ -584,6 +586,7 @@ def main():
     if args.html:
         Extractor.keepLinks = True
     Extractor.to_json = args.json
+    Extractor.discard_empty = args.discard_empty
 
     try:
         power = 'kmg'.find(args.bytes[-1].lower()) + 1

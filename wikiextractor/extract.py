@@ -924,6 +924,10 @@ class Extractor():
     to_json = False
 
     ##
+    # Whether or not to discard empty (title only) documents
+    discard_empty = False
+
+    ##
     # Obtained from TemplateNamespace
     templatePrefix = ''
 
@@ -976,7 +980,9 @@ class Extractor():
         text = ''.join(self.page)
         text = self.clean_text(text, html_safe=html_safe)
 
-        if self.to_json:
+        if self.discard_empty and not text:
+            pass
+        elif self.to_json:
             json_data = {
 		'id': self.id,
                 'revid': self.revid,
