@@ -942,6 +942,7 @@ class Extractor():
         self.recursion_exceeded_2_errs = 0  # template recursion within expandTemplate()
         self.recursion_exceeded_3_errs = 0  # parameter recursion
         self.template_title_errs = 0
+	self.to_json = False # fixed
 
     def clean_text(self, text, mark_headers=False, expand_templates=True,
                    html_safe=True):
