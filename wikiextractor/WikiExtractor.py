@@ -180,7 +180,7 @@ class OutputSplitter():
         if self.compress:
             return bz2.BZ2File(filename + '.bz2', 'w')
         else:
-            return open(filename, 'w')
+            return open(filename, 'w', encoding = 'utf-8')
 
 
 # ----------------------------------------------------------------------
