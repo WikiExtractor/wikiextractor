@@ -30,7 +30,7 @@ import time
 # ----------------------------------------------------------------------
 
 # match tail after wikilink
-tailRE = re.compile('\w+')
+tailRE = re.compile(r'\w+')
 syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlight&gt;', re.DOTALL)
 
 ## PARAMS ####################################################################
@@ -168,8 +168,8 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     text = text.replace('\t', ' ')
     text = spaces.sub(' ', text)
     text = dots.sub('...', text)
-    text = re.sub(u' (,:\.\)\]»)', r'\1', text)
-    text = re.sub(u'(\[\(«) ', r'\1', text)
+    text = re.sub(r' (,:\.\)\]»)', r'\1', text)
+    text = re.sub(r'(\[\(«) ', r'\1', text)
     text = re.sub(r'\n\W+?\n', '\n', text, flags=re.U)  # lines with only punctuations
     text = text.replace(',,', ',').replace(',.', '.')
     if html_safe:
@@ -259,7 +259,8 @@ def compact(text, mark_headers=False):
                     line = line[l:].strip()
                 page.append(listItem[type] % line)
             else:
-                continue
+                if not line.lstrip('*#;').lower().startswith('redirect'):
+                    page.append(line.lstrip('*#;')) # fix for bullet points
         elif len(listLevel):    # implies Extractor.HtmlFormatting
             for c in reversed(listLevel):
                 page.append(listClose[c])
@@ -380,12 +381,12 @@ wgUrlProtocols = [
 # as well as U+3000 is IDEOGRAPHIC SPACE for bug 19052
 EXT_LINK_URL_CLASS = r'[^][<>"\x00-\x20\x7F\s]'
 ExtLinkBracketedRegex = re.compile(
-    '\[(((?i)' + '|'.join(wgUrlProtocols) + ')' + EXT_LINK_URL_CLASS + r'+)\s*([^\]\x00-\x08\x0a-\x1F]*?)\]',
-    re.S | re.U)
+    r'\[((?:' + '|'.join(wgUrlProtocols) + ')' + EXT_LINK_URL_CLASS + r'+)\s*([^\]\x00-\x08\x0a-\x1F]*?)\]',
+    re.S | re.U | re.I)
 EXT_IMAGE_REGEX = re.compile(
     r"""^(http://|https://)([^][<>"\x00-\x20\x7F\s]+)
-    /([A-Za-z0-9_.,~%\-+&;#*?!=()@\x80-\xFF]+)\.((?i)gif|png|jpg|jpeg)$""",
-    re.X | re.S | re.U)
+    /([A-Za-z0-9_.,~%\-+&;#*?!=()@\x80-\xFF]+)\.(gif|png|jpg|jpeg)$""",
+    re.X | re.S | re.U | re.I)
 
 
 def replaceExternalLinks(text):
@@ -396,7 +397,7 @@ def replaceExternalLinks(text):
         cur = m.end()
 
         url = m.group(1)
-        label = m.group(3)
+        label = m.group(2)
 
         # # The characters '<' and '>' (which were escaped by
         # # removeHTMLtags()) should not be included in
@@ -734,7 +735,7 @@ def unescape(text):
         except:
             return text  # leave as is
 
-    return re.sub("&#?(\w+);", fixup, text)
+    return re.sub(r"&#?(\w+);", fixup, text)
 
 
 # Match HTML comments
@@ -921,13 +922,13 @@ class Extractor():
 
     ##
     # Whether to produce json instead of the default <doc> output format.
-    toJson = False
+    to_json = False
 
     ##
     # Obtained from TemplateNamespace
     templatePrefix = ''
 
-    def __init__(self, id, revid, urlbase, title, page):
+    def __init__(self, id, revid, urlbase, title, page, to_json = False):
         """
         :param page: a list of lines.
         """
@@ -942,6 +943,7 @@ class Extractor():
         self.recursion_exceeded_2_errs = 0  # template recursion within expandTemplate()
         self.recursion_exceeded_3_errs = 0  # parameter recursion
         self.template_title_errs = 0
+        self.to_json = to_json # fixed
 
     def clean_text(self, text, mark_headers=False, expand_templates=True,
                    html_safe=True):
@@ -1394,11 +1396,11 @@ def findMatchingBraces(text, ldelim=0):
     #   {{{link|{{ucfirst:{{{1}}}}}} interchange}}}
 
     if ldelim:  # 2-3
-        reOpen = re.compile('[{]{%d,}' % ldelim)  # at least ldelim
-        reNext = re.compile('[{]{2,}|}{2,}')  # at least 2 open or close bracces
+        reOpen = re.compile(r'[{]{%d,}' % ldelim)  # at least ldelim
+        reNext = re.compile(r'[{]{2,}|}{2,}')  # at least 2 open or close bracces
     else:
-        reOpen = re.compile('{{2,}|\[{2,}')
-        reNext = re.compile('{{2,}|}{2,}|\[{2,}|]{2,}')  # at least 2
+        reOpen = re.compile(r'{{2,}|\[{2,}')
+        reNext = re.compile(r'{{2,}|}{2,}|\[{2,}|]{2,}')  # at least 2
 
     cur = 0
     while True:
@@ -1649,7 +1651,7 @@ def sharp_ifeq(lvalue, rvalue, valueIfTrue, valueIfFalse=None, *args):
 
 
 def sharp_iferror(test, then='', Else=None, *args):
-    if re.match('<(?:strong|span|p|div)\s(?:[^\s>]*\s+)*?class="(?:[^"\s>]*\s+)*?error(?:\s[^">]*)?"', test):
+    if re.match(r'<(?:strong|span|p|div)\s(?:[^\s>]*\s+)*?class="(?:[^"\s>]*\s+)*?error(?:\s[^">]*)?"', test):
         return then
     elif Else is None:
         return test.strip()
@@ -1820,7 +1822,7 @@ def define_template(title, page):
     # title = normalizeTitle(title)
 
     # check for redirects
-    m = re.match('#REDIRECT.*?\[\[([^\]]*)]]', page[0], re.IGNORECASE)
+    m = re.match(r'#REDIRECT.*?\[\[([^\]]*)]]', page[0], re.IGNORECASE)
     if m:
         redirects[title] = m.group(1)  # normalizeTitle(m.group(1))
         return

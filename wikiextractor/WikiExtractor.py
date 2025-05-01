@@ -63,7 +63,7 @@ from io import StringIO
 from multiprocessing import Queue, get_context, cpu_count
 from timeit import default_timer
 
-from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
+from wikiextractor.extract import Extractor, ignoreTag, define_template, acceptedNamespaces
 
 # ===========================================================================
 
@@ -180,7 +180,7 @@ class OutputSplitter():
         if self.compress:
             return bz2.BZ2File(filename + '.bz2', 'w')
         else:
-            return open(filename, 'w')
+            return open(filename, 'w', encoding = 'utf-8')
 
 
 # ----------------------------------------------------------------------
@@ -336,7 +336,7 @@ def collect_pages(text):
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe, expand_templates=True):
+                 process_count, html_safe, expand_templates=True, to_json=False):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -398,12 +398,11 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         logging.info("Loaded %d templates in %.1fs", templates, template_load_elapsed)
 
     if out_file == '-':
-        output = sys.stdout
+        output = None
         if file_compress:
             logging.warn("writing to stdout, so no output compression (use an external tool)")
     else:
-        nextFile = NextFile(out_file)
-        output = OutputSplitter(nextFile, file_size, file_compress)
+        output = (out_file, file_size, file_compress)
 
     # process pages
     logging.info("Starting page extraction from %s.", input_file)
@@ -414,7 +413,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # - a reduce process collects the results, sort them and print them.
 
     # fixes MacOS error: TypeError: cannot pickle '_io.TextIOWrapper' object
-    Process = get_context("fork").Process
+    Process = get_context("spawn").Process
 
     maxsize = 10 * process_count
     # output queue
@@ -432,7 +431,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, html_safe))
+                            args=(jobs_queue, output_queue, html_safe, to_json))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
@@ -462,8 +461,6 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # wait for it to finish
     reduce.join()
 
-    if output != sys.stdout:
-        output.close()
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
     logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
@@ -474,17 +471,17 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, html_safe):
+def extract_process(jobs_queue, output_queue, html_safe, to_json):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
     :html_safe: whether to convert entities in text to HTML.
     """
     while True:
-        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page)
+        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
         if job:
             out = StringIO()  # memory buffer
-            Extractor(*job[:-1]).extract(out, html_safe)  # (id, urlbase, title, page)
+            Extractor(*job[:-1], to_json=to_json).extract(out, html_safe)
             text = out.getvalue()
             output_queue.put((job[-1], text))  # (ordinal, extracted_text)
             out.close()
@@ -492,13 +489,19 @@ def extract_process(jobs_queue, output_queue, html_safe):
             break
 
 
-def reduce_process(output_queue, output):
+def reduce_process(output_queue, output_file=None):
     """
     Pull finished article text, write series of files (or stdout)
     :param output_queue: text to be output.
-    :param output: file object where to print.
+    :param output: A optional tuple that consists of output_file, file_size and file_compress argument.
     """
 
+    if output_file is None:
+        output = sys.stdout # default
+    else:
+        nextFile, file_size, file_compress = output_file
+        output = OutputSplitter(NextFile(nextFile), file_size, file_compress)
+        
     interval_start = default_timer()
     period = 100000
     # FIXME: use a heap
@@ -521,6 +524,9 @@ def reduce_process(output_queue, output):
                 break
             ordinal, text = pair
             ordering_buffer[ordinal] = text
+
+    if output != sys.stdout:
+        output.close()
 
 
 # ----------------------------------------------------------------------
@@ -637,7 +643,7 @@ def main():
             return
 
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.html_safe, not args.no_templates)
+                 args.compress, args.processes, args.html_safe, not args.no_templates, args.json)
 
 if __name__ == '__main__':
     main()
