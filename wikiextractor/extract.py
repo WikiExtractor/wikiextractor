@@ -942,6 +942,8 @@ class Extractor():
         self.recursion_exceeded_2_errs = 0  # template recursion within expandTemplate()
         self.recursion_exceeded_3_errs = 0  # parameter recursion
         self.template_title_errs = 0
+        self.template_loop_errs = 0  # same (title, params) reappearing in its own expansion chain
+        self.warned_loop_keys = set()  # (id, title) pairs already warned about, to avoid log spam
 
     def clean_text(self, text, mark_headers=False, expand_templates=True,
                    html_safe=True):
@@ -998,9 +1000,10 @@ class Extractor():
         errs = (self.template_title_errs,
                 self.recursion_exceeded_1_errs,
                 self.recursion_exceeded_2_errs,
-                self.recursion_exceeded_3_errs)
+                self.recursion_exceeded_3_errs,
+                self.template_loop_errs)
         if any(errs):
-            logging.warn("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d)",
+            logging.warn("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d) loop(%d)",
                          self.title, self.id, *errs)
 
     # ----------------------------------------------------------------------
@@ -1265,6 +1268,32 @@ class Extractor():
 
         # build a dict of name-values for the parameter values
         params = self.templateParams(params)
+
+        # Guard against template self-inclusion loops. We compare (title,
+        # params) rather than title alone: a template legitimately calling
+        # itself with *different* (e.g. progressively shrinking) parameters
+        # is a common, intentional MediaWiki idiom for iterating over a
+        # variable-length argument list (templates have no native loop
+        # construct) -- it makes real progress each step and terminates on
+        # its own, well within maxTemplateRecursionLevels. That must NOT be
+        # blocked. What we actually want to catch is the same title being
+        # invoked again with the *same* parameters as an active ancestor --
+        # that's genuine zero-progress recursion (e.g. a template whose
+        # /doc examples re-invoke it with fixed, hardcoded parameters),
+        # which can branch combinatorially and never terminates in practice.
+        # Real MediaWiki detects the analogous case ("Template loop
+        # detected: Template:X") and stops immediately; do the same here.
+        if any(frameTitle == title and frameParams == params
+               for frameTitle, frameParams in self.frame):
+            self.template_loop_errs += 1
+            loopKey = (self.id, title)
+            if loopKey not in self.warned_loop_keys:
+                self.warned_loop_keys.add(loopKey)
+                logging.warning("Template loop detected: %s (article %s, id %s) -- "
+                                 "leaving unexpanded (further repeats in this "
+                                 "article are counted but not logged)",
+                                 title, self.title, self.id)
+            return '{{' + body + '}}'
 
         # Perform parameter substitution
         # extend frame before subst, since there may be recursion in default
