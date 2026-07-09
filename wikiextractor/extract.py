@@ -921,7 +921,7 @@ class Extractor():
 
     ##
     # Whether to produce json instead of the default <doc> output format.
-    toJson = False
+    to_json = False
 
     ##
     # Obtained from TemplateNamespace
