@@ -1220,7 +1220,12 @@ class Extractor():
             template = Template.parse(templates[title])
             # add it to cache
             templateCache[title] = template
-            del templates[title]
+            try:
+                del templates[title]
+            except KeyError:
+                # Duplicated articles
+                # Noticed with article 'Ашаблон:Акарточка аполитик' of from ab-wiki dump
+                pass
         else:
             # The page being included could not be identified
             return ''

@@ -56,11 +56,12 @@ collecting template definitions.
 import argparse
 import bz2
 import logging
-import os.path
+import os
 import re  # TODO use regex when it will be standard
 import sys
 from io import StringIO
 from multiprocessing import Queue, get_context, cpu_count
+from multiprocessing.dummy import Process as WinProcess
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
@@ -180,7 +181,8 @@ class OutputSplitter():
         if self.compress:
             return bz2.BZ2File(filename + '.bz2', 'w')
         else:
-            return open(filename, 'w')
+            # Fixes default encoding on Windows
+            return open(filename, 'w', encoding="utf-8")
 
 
 # ----------------------------------------------------------------------
@@ -414,7 +416,13 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # - a reduce process collects the results, sort them and print them.
 
     # fixes MacOS error: TypeError: cannot pickle '_io.TextIOWrapper' object
-    Process = get_context("fork").Process
+    # fixes Windows errors:
+    # 1. (when using "fork"):ValueError: cannot find context for 'fork'
+    # 2. (when using "spawn"):TypeError: cannot pickle '_io.TextIOWrapper' object
+    if os.name == 'nt':
+        Process = WinProcess
+    else:
+        Process = get_context("fork").Process
 
     maxsize = 10 * process_count
     # output queue
