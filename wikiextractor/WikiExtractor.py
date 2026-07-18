@@ -162,23 +162,21 @@ class OutputSplitter():
         self.file = self.open(self.nextFile.next())
 
     def reserve(self, size):
-        if self.file.tell() + size > self.max_file_size:
+        if self.size + size > self.max_file_size:
             self.close()
             self.file = self.open(self.nextFile.next())
 
     def write(self, data):
         self.reserve(len(data))
-        if self.compress:
-            self.file.write(data)
-        else:
-            self.file.write(data)
+        self.size += self.file.write(data)
 
     def close(self):
         self.file.close()
 
     def open(self, filename):
+        self.size = 0
         if self.compress:
-            return bz2.BZ2File(filename + '.bz2', 'w')
+            return bz2.open(filename + '.bz2', 'wt')
         else:
             return open(filename, 'w')
 
