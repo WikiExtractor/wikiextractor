@@ -56,8 +56,7 @@ Each file will contains several documents in this [document format](https://gith
 
 ```
 usage: wikiextractor [-h] [-o OUTPUT] [-b n[KMG]] [-c] [--json] [--html] [-l] [-ns ns1,ns2]
-			 [--templates TEMPLATES] [--no-templates] [--html-safe HTML_SAFE] [--processes PROCESSES]
-			 [-q] [--debug] [-a] [-v]
+			 [--preserve-unicode] [--templates TEMPLATES] [--no-templates] [--html-safe HTML_SAFE] [--processes PROCESSES] [-q] [--debug] [-a] [-v]
 			 input
 
 Wikipedia Extractor:
@@ -93,6 +92,8 @@ Output:
 			    maximum bytes per output file (default 1M)
   -c, --compress        compress output files using bzip
   --json                write output in json format instead of the default <doc> format
+  --preserve-unicode
+          Do not convert unicode characters to ascii characters when using JSON output
 
 Processing:
   --html                produce HTML output, subsumes --links

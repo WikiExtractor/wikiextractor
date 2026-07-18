@@ -982,7 +982,10 @@ class Extractor():
                 'title': self.title,
                 'text': "\n".join(text)
             }
-            out_str = json.dumps(json_data)
+            if self.preserve_unicode:
+                out_str = json.dumps(json_data, ensure_ascii=False)
+            else:
+                out_str = json.dumps(json_data)
             out.write(out_str)
             out.write('\n')
         else:
