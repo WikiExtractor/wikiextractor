@@ -186,8 +186,8 @@ class OutputSplitter():
 # ----------------------------------------------------------------------
 # READER
 
-tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*>(?:([^<]*)(<.*?>)?)?')
-#                    1     2               3      4
+tagRE = re.compile(r'(.*?)<(/?\w+)[^/>]*(/?)>(?:([^<]*)(<.*?>)?)?')
+#                    1     2             3        4       5
 
 
 def load_templates(file, output_file=None):
@@ -303,18 +303,18 @@ def collect_pages(text):
             page = []
             redirect = False
         elif tag == 'id' and not id:
-            id = m.group(3)
+            id = m.group(4)
         elif tag == 'id' and id: # <revision> <id></id> </revision>
-            revid = m.group(3)
+            revid = m.group(4)
         elif tag == 'title':
-            title = m.group(3)
+            title = m.group(4)
         elif tag == 'redirect':
             redirect = True
         elif tag == 'text':
             inText = True
-            line = line[m.start(3):m.end(3)]
+            line = line[m.start(4):m.end(4)]
             page.append(line)
-            if m.lastindex == 4:  # open-close
+            if m.lastindex == 5 or m.group(3) == "/":  # open-close
                 inText = False
         elif tag == '/text':
             if m.group(1):
