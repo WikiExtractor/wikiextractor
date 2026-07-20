@@ -118,7 +118,7 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
         text = bold_italic.sub(r'\1', text)
         text = bold.sub(r'\1', text)
         text = italic_quote.sub(r'"\1"', text)
-        text = italic.sub(r'"\1"', text)
+        text = italic.sub(r'\1', text)
         text = quote_quote.sub(r'"\1"', text)
     # residuals of unbalanced quotes
     text = text.replace("'''", '').replace("''", '"')
@@ -201,7 +201,8 @@ def compact(text, mark_headers=False):
         if not line:
             if len(listLevel):    # implies Extractor.HtmlFormatting
                 for c in reversed(listLevel):
-                    page.append(listClose[c])
+                    if Extractor.HtmlFormatting:
+                        page.append(listClose[c])
                     listLevel = ''
             continue
 
@@ -212,6 +213,8 @@ def compact(text, mark_headers=False):
             lev = len(m.group(1))
             if Extractor.HtmlFormatting:
                 page.append("<h%d>%s</h%d>" % (lev, title, lev))
+            else:
+                page.append("\n%s" % title)
             if title and title[-1] not in '!?':
                 title += '.'
 
@@ -236,33 +239,37 @@ def compact(text, mark_headers=False):
         # handle lists
         # @see https://www.mediawiki.org/wiki/Help:Formatting
         elif line[0] in '*#;':
-            if Extractor.HtmlFormatting:
-                # close extra levels
-                l = 0
-                for c in listLevel:
-                    if l < len(line) and c != line[l]:
-                        for extra in reversed(listLevel[l:]):
+            # close extra levels
+            l = 0
+            for c in listLevel:
+                if l < len(line) and c != line[l]:
+                    for extra in reversed(listLevel[l:]):
+                        if Extractor.HtmlFormatting:
                             page.append(listClose[extra])
-                        listLevel = listLevel[:l]
-                        break
-                    l += 1
-                if l < len(line) and line[l] in '*#;:':
-                    # add new level (only one, no jumps)
-                    # FIXME: handle jumping levels
-                    type = line[l]
+                    listLevel = listLevel[:l]
+                    break
+                l += 1
+            if l < len(line) and line[l] in '*#;:':
+                # add new level (only one, no jumps)
+                # FIXME: handle jumping levels
+                type = line[l]
+                if Extractor.HtmlFormatting:
                     page.append(listOpen[type])
-                    listLevel += type
-                    line = line[l+1:].strip()
-                else:
-                    # continue on same level
+                listLevel += type
+                line = line[l+1:].strip()
+            else:
+                # continue on same level
+                if l < len(line):
                     type = line[l-1]
-                    line = line[l:].strip()
+                line = line[l:].strip()
+            if Extractor.HtmlFormatting:
                 page.append(listItem[type] % line)
             else:
-                continue
+                page.append("- %s" % line)
         elif len(listLevel):    # implies Extractor.HtmlFormatting
             for c in reversed(listLevel):
-                page.append(listClose[c])
+                if Extractor.HtmlFormatting:
+                    page.append(listClose[c])
             listLevel = []
 
         # Drop residuals of lists
@@ -669,7 +676,7 @@ ignoredTags = (
     'abbr', 'b', 'big', 'blockquote', 'center', 'cite', 'div', 'em',
     'font', 'h1', 'h2', 'h3', 'h4', 'hiero', 'i', 'kbd', 'nowiki',
     'p', 'plaintext', 's', 'span', 'strike', 'strong',
-    'sub', 'sup', 'tt', 'u', 'var'
+    'sub', 'sup', 'tt', 'u', 'var', 'templatestyles', 'indicator', 'br',
 )
 
 placeholder_tags = {'math': 'formula', 'code': 'codice'}
@@ -914,7 +921,7 @@ class Extractor():
 
     ##
     # Whether to preserve section titles
-    keepSections = True
+    keepSections = False
 
     ##
     # Whether to output text with HTML formatting elements in <doc> files.
