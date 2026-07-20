@@ -617,7 +617,8 @@ class MagicWords():
         '__INDEX__',
         '__NOINDEX__',
         '__STATICREDIRECT__',
-        '__DISAMBIG__'
+        '__DISAMBIG__',
+        '__NOEDITSECTION__',
     )
 
 
