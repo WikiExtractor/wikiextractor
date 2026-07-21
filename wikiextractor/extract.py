@@ -983,7 +983,7 @@ class Extractor():
         text = ''.join(self.page)
         text = self.clean_text(text, html_safe=html_safe)
 
-        if self.discard_empty and not text:
+        if self.discard_empty and not any(t.strip() for t in text):
             pass
         elif self.to_json:
             json_data = {

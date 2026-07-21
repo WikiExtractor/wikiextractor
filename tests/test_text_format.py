@@ -102,13 +102,20 @@ class TextFormatOutputTests(TextFormatTestCase):
 
 class DiscardEmptyTests(TextFormatTestCase):
     """--discard_empty should skip writing anything for articles whose
-    body extracts to nothing (verified: clean_text() returns [] for
-    redirects and category-only stubs, which is falsy and triggers the
-    'if self.discard_empty and not text: pass' check), and this must
-    apply the same way regardless of output format.
+    body has no real (non-whitespace) content -- redirects and
+    category-only stubs correctly produced clean_text() == [] from the
+    start, but a whitespace-only body (e.g. clean_text() returning
+    [' ', ' ']) was NOT caught by the original 'not text' check, since a
+    non-empty list of blank strings is still truthy. The fix checks
+    `not any(t.strip() for t in text)` instead, which covers both cases
+    while still preserving articles that have real content alongside
+    some blank paragraphs. This must apply the same way regardless of
+    output format.
     """
 
     REDIRECT_BODY = "#REDIRECT [[Other Page]]"
+    WHITESPACE_ONLY_BODY = "   \n\n  "
+    MIXED_BODY = "\n\n\nActual content here.\n\n\n"
     NORMAL_BODY = "A real article with actual content in it."
 
     def test_discard_empty_skips_redirect_in_text_format(self):
@@ -125,6 +132,21 @@ class DiscardEmptyTests(TextFormatTestCase):
         output = self.extract_output(self.REDIRECT_BODY,
                                       to_json=True, discard_empty=True)
         self.assertEqual(output, "")
+
+    def test_discard_empty_skips_whitespace_only_body(self):
+        # clean_text() returns a non-empty list of blank strings here
+        # (e.g. [' ', ' ']), not [] -- this is the case the original
+        # 'not text' check missed.
+        output = self.extract_output(self.WHITESPACE_ONLY_BODY,
+                                      to_text=True, discard_empty=True)
+        self.assertEqual(output, "")
+
+    def test_discard_empty_preserves_body_with_some_blank_paragraphs(self):
+        # A body with blank paragraphs AND real content must NOT be
+        # discarded -- only bodies with zero real content anywhere.
+        output = self.extract_output(self.MIXED_BODY,
+                                      to_text=True, discard_empty=True)
+        self.assertIn("Actual content here.", output)
 
     def test_discard_empty_does_not_affect_normal_articles(self):
         output = self.extract_output(self.NORMAL_BODY,
