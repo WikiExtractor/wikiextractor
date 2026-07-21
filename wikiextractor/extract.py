@@ -501,6 +501,85 @@ def makeExternalImage(url, alt=''):
 # Also: [[Help:IPA for Catalan|[andora]]]
 
 
+def collapseDoubledLinkBrackets(text):
+    """
+    Collapse a real, surprisingly common wikitext authoring mistake:
+    doubled link brackets, e.g. [[[[title]]]] instead of [[title]].
+    Found at meaningful scale on multiple language wikis -- sometimes
+    as an isolated typo, sometimes baked into a widely-transcluded
+    template (e.g. a sister-projects/interwiki table), in which case a
+    single buggy template can produce very many instances.
+
+    A valid link target can never legitimately start with "[[" as its
+    own first two characters, so a run of 3+ opening brackets is never
+    genuine nesting -- only ever this mistake. Where the closing side
+    has a matching excess (the common case: someone doubled the whole
+    [[...]] wrapper symmetrically), both sides are stripped and the
+    result is fully clean with no residue. An asymmetric mistake (fewer
+    closing brackets than opens) also comes out fully clean, since
+    there's nothing extra on the closing side to begin with -- the
+    opening collapse alone recovers the real content with no residue.
+    Residue only shows up in a narrower, more ambiguous case: a doubled
+    outer wrapper around content that itself contains several
+    genuinely separate real links, where the excess closing brackets
+    exist but only appear at the very end, not immediately after the
+    first inner link's own close. There, this function safely falls
+    back to collapsing just the opening side rather than guessing at a
+    merge that could misinterpret the real link structure --
+    findBalanced() still recovers all the real inner links correctly,
+    just with a couple of stray trailing "]" characters left over in
+    that specific case.
+
+    Deliberately does not touch the closing side on its own: adjacent
+    closing brackets legitimately occur in real nesting, e.g.
+    [[File:x.jpg|[[real link]]]] where a nested real link is the last
+    thing before the outer link's own close.
+    """
+    result = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == '[':
+            j = i
+            while j < n and text[j] == '[':
+                j += 1
+            open_run = j - i
+            if open_run >= 3:
+                excess = open_run - 2
+                # Find where a normal, correctly-nested single link
+                # starting at position j would naturally close, using
+                # findBalanced() itself rather than a naive first-']]'
+                # scan -- this correctly skips over any genuinely
+                # nested real link in between (e.g. a File: link whose
+                # caption itself contains an actual [[link]]), rather
+                # than mistaking that inner link's own close for the
+                # outer one's.
+                pseudo = '[[' + text[j:]
+                match = next(iter(findBalanced(pseudo, ['[['], [']]'])), None)
+                if match is not None:
+                    _, pseudo_end = match
+                    close_pos = j + (pseudo_end - 2) - 2
+                    k = close_pos + 2
+                    trailing_closes = 0
+                    while k < n and text[k] == ']' and trailing_closes < excess:
+                        trailing_closes += 1
+                        k += 1
+                    if trailing_closes == excess:
+                        result.append('[[')
+                        result.append(text[j:close_pos + 2])
+                        i = close_pos + 2 + excess
+                        continue
+                # Fallback: collapse just the opens; the closing side
+                # is left as-is (may leave a small residue, same as
+                # not attempting the symmetric case at all).
+                result.append('[[')
+                i = j
+                continue
+        result.append(text[i])
+        i += 1
+    return ''.join(result)
+
+
 def replaceInternalLinks(text):
     """
     Replaces external links of the form:
@@ -510,6 +589,8 @@ def replaceInternalLinks(text):
     """
     # call this after removal of external links, so we need not worry about
     # triple closing ]]].
+    text = collapseDoubledLinkBrackets(text)
+
     cur = 0
     res = ''
     for s, e in findBalanced(text, ['[['], [']]']):
