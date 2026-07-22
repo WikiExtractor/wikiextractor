@@ -118,26 +118,53 @@ class AsymmetricDoublingTests(unittest.TestCase):
 
 class AmbiguousComplexCaseTests(unittest.TestCase):
     """A doubled outer wrapper around content containing several
-    genuinely separate real links -- the excess closes only appear at
-    the very end, not right after the first inner link's own close, so
-    this doesn't resolve as a clean symmetric match. All three real
-    inner links must still be correctly recovered; a small residue at
-    the very end is an accepted, documented limitation for this
-    narrower, more ambiguous shape (safer than guessing at a merge that
-    could misinterpret genuine link structure).
+    genuinely separate real links: the excess closes only appear at
+    the very end, not right after the first inner link's own close,
+    and there's more text after that first inner close -- so this
+    doesn't resolve as a clean symmetric match, and per
+    collapseDoubledLinkBrackets()'s docstring, is left completely
+    untouched rather than partially collapsed.
+
+    An earlier version of this fix partially collapsed this shape
+    (just the opening side) instead, recovering the individual real
+    links with a small residue left over. That was reverted after a
+    real Saraiki Wikipedia case (بزمِ کیفی جامپوری, id 902) showed
+    partial collapse can turn a case that was ACCIDENTALLY correct on
+    the original, fully-unmodified text into something newly broken:
+    [[[[سرائیکی]] زبان|سرائیکی]] already resolves correctly without
+    any fix at all (findBalanced() matches the whole thing as one
+    piece, and the pipe hides the embedded garbage behind a clean
+    label) -- but collapsing just the opening side made the first
+    inner closing pair look like a complete match on its own, ending
+    too early and stranding "زبان|سرائیکی]]" as newly-visible leftover
+    text that was never visible before. See
+    test_real_saraiki_case_that_forced_this_design_change below.
+
+    Leaving this shape completely untouched means the fix can only
+    ever improve on the unmodified behavior, never make a previously-
+    correct case worse -- at the cost of not attempting to also
+    recover the individual real links in this more complex shape,
+    which fall back to exactly what findBalanced() would have done
+    without this fix at all (visible embedded brackets, same as
+    before any of this work existed).
     """
 
-    def test_multi_link_case_recovers_all_real_links(self):
+    def test_real_saraiki_case_that_forced_this_design_change(self):
+        # The case that revealed partial-collapse could regress a
+        # previously-correct result. Must match the original,
+        # completely-unmodified behavior exactly.
+        text = "بزم دے [[اردو]] /[[[[سرائیکی]] زبان|سرائیکی]] شعراء کرام"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "بزم دے اردو /سرائیکی شعراء کرام")
+
+    def test_multi_link_case_left_untouched_not_partially_collapsed(self):
         # Real example from Sindhi Wikipedia (a motorway infobox row).
+        # This must now match exactly what findBalanced() alone would
+        # produce with no bracket-collapse fix applied at all: the
+        # whole span treated as one piece, embedded brackets visible.
         text = "[[[[کراچی]] تا [[لاہور]] [[موٹر وے]] (KLM)]]"
         result = ex.replaceInternalLinks(text)
-
-        self.assertIn("کراچی", result)
-        self.assertIn("لاہور", result)
-        self.assertIn("موٹر وے", result)
-        self.assertNotIn("[[", result)
-        # Documented, accepted residue for this specific ambiguous shape.
-        self.assertEqual(result, "کراچی تا لاہور موٹر وے (KLM)]]")
+        self.assertEqual(result, "[[کراچی]] تا [[لاہور]] [[موٹر وے]] (KLM)")
 
 
 class NormalLinkRegressionTests(unittest.TestCase):

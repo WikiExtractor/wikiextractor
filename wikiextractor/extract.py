@@ -512,23 +512,44 @@ def collapseDoubledLinkBrackets(text):
 
     A valid link target can never legitimately start with "[[" as its
     own first two characters, so a run of 3+ opening brackets is never
-    genuine nesting -- only ever this mistake. Where the closing side
-    has a matching excess (the common case: someone doubled the whole
-    [[...]] wrapper symmetrically), both sides are stripped and the
-    result is fully clean with no residue. An asymmetric mistake (fewer
-    closing brackets than opens) also comes out fully clean, since
-    there's nothing extra on the closing side to begin with -- the
-    opening collapse alone recovers the real content with no residue.
-    Residue only shows up in a narrower, more ambiguous case: a doubled
-    outer wrapper around content that itself contains several
-    genuinely separate real links, where the excess closing brackets
-    exist but only appear at the very end, not immediately after the
-    first inner link's own close. There, this function safely falls
-    back to collapsing just the opening side rather than guessing at a
-    merge that could misinterpret the real link structure --
-    findBalanced() still recovers all the real inner links correctly,
-    just with a couple of stray trailing "]" characters left over in
-    that specific case.
+    genuine nesting -- only ever this mistake. Three distinct cases:
+
+    1. The closing side has a matching excess immediately after the
+       first natural close (the common case: someone doubled the whole
+       [[...]] wrapper symmetrically) -- both sides are stripped and
+       the result is fully clean with no residue.
+
+    2. No natural close is found at all anywhere in the rest of the
+       text (an asymmetric mistake: fewer closing brackets than opens,
+       e.g. the real Sindhi Wikipedia "[[[[يوني ايئر(Uni Air)]]" case:
+       4 opens, only 2 closes). Collapsing just the opening side is
+       safe here and comes out fully clean, since there's nothing else
+       to strand.
+
+    3. A natural close IS found, but nothing extra immediately follows
+       it -- there's some other, different structure in between
+       before wherever a true excess (if any) actually sits, e.g. the
+       real Saraiki Wikipedia case [[[[سرائیکی]] زبان|سرائیکی]] (the
+       true outer close is on the far side of a whole separate
+       "زبان|..." phrase, not immediately after the first inner
+       close). This is the one case where this function does NOT
+       modify anything, leaving the run entirely untouched instead of
+       collapsing just the opens. Collapsing just the opens here would
+       be unsafe: findBalanced() on the original, fully-unmodified
+       text already matches the whole (globally-balanced) span as one
+       piece, and when a pipe happens to hide embedded garbage behind
+       a clean label, that already produces correct output on its own
+       -- but collapsing just the opens would make the first inner
+       closing pair look like a complete, separate match, ending too
+       early and stranding everything after it as newly-visible
+       leftover text that was never visible before. Leaving it
+       untouched means this function can only ever improve on the
+       unmodified behavior, never make a previously-correct case
+       worse -- at the cost of not attempting to also recover the
+       individual real links in more complex versions of this shape
+       (e.g. a doubled wrapper around several separate real links),
+       which remain exactly as findBalanced() would have handled them
+       without this function at all.
 
     Deliberately does not touch the closing side on its own: adjacent
     closing brackets legitimately occur in real nesting, e.g.
@@ -598,14 +619,51 @@ def collapseDoubledLinkBrackets(text):
                 cur = close_pos + 2 + excess
                 pos = cur
                 continue
-        # Fallback: collapse just the opens; the closing side
-        # is left as-is (may leave a small residue, same as
-        # not attempting the symmetric case at all).
+            if close_pos + 2 == n:
+                # The found natural close is the very last thing in
+                # the text -- nothing follows it at all, e.g. the real
+                # Sindhi Wikipedia "[[[[يوني ايئر(Uni Air)]]" case: 4
+                # opens, only 2 closes, and the found close ends
+                # exactly at the end of the text. Collapsing just the
+                # opens is safe here: there's nothing left afterward
+                # that could be stranded.
+                result.append('[[')
+                cur = j
+                pos = j
+                continue
+            # A natural close WAS found here, but nothing extra
+            # immediately follows it, AND there's still more text
+            # after it -- some other, different structure exists in
+            # between before wherever a true excess (if any) actually
+            # sits, e.g. the real Saraiki Wikipedia case
+            # [[[[سرائیکی]] زبان|سرائیکی]] (the true outer close is on
+            # the far side of a whole separate "زبان|..." phrase, not
+            # immediately after the first inner close). Collapsing
+            # just the opens here is unsafe: it can turn a case that
+            # was ACCIDENTALLY working correctly on the original,
+            # fully-unmodified text into something worse. findBalanced()
+            # on the original text would match the whole (globally-
+            # balanced) span as one piece, and if a pipe happens to
+            # hide embedded garbage behind a clean label, that already
+            # produces correct output -- but collapsing just the opens
+            # makes the first inner closing pair look like a complete,
+            # separate match on its own, ending too early and
+            # stranding everything after it as newly-visible leftover
+            # text that was never visible before. Leave this run
+            # completely untouched instead, and defer entirely to what
+            # findBalanced() would already do.
+            result.append(text[i:j])
+            cur = j
+            pos = j
+            continue
+        # No natural close found at all anywhere in the rest of the
+        # text. Collapsing just the opens is safe here too, for the
+        # same reason as the "nothing follows" case above: there's
+        # nothing left afterward that could be stranded.
         result.append('[[')
         cur = j
         pos = j
     result.append(text[cur:])
-    return ''.join(result)
     return ''.join(result)
 
 
