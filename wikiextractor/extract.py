@@ -535,52 +535,88 @@ def collapseDoubledLinkBrackets(text):
     [[File:x.jpg|[[real link]]]] where a nested real link is the last
     thing before the outer link's own close.
     """
+    # Fast path: the vast majority of documents contain no run of 3+
+    # consecutive opening brackets at all (measured: a small fraction
+    # of articles even on the wikis where this pattern shows up).
+    # "[[[" appearing as a substring is exactly equivalent to "a run of
+    # 3+ consecutive '[' exists somewhere" (if such a run exists, its
+    # first 3 characters are that substring; if that substring exists,
+    # those are 3 consecutive '[' by definition) -- so this is a fully
+    # safe, exact short-circuit, not an approximation, and lets the
+    # (relatively expensive) per-character scan below be skipped
+    # entirely for documents that don't need it.
+    if '[[[' not in text:
+        return text
+
     result = []
-    i = 0
+    cur = 0
     n = len(text)
-    while i < n:
-        if text[i] == '[':
-            j = i
-            while j < n and text[j] == '[':
-                j += 1
-            open_run = j - i
-            if open_run >= 3:
-                excess = open_run - 2
-                # Find where a normal, correctly-nested single link
-                # starting at position j would naturally close, using
-                # findBalanced() itself rather than a naive first-']]'
-                # scan -- this correctly skips over any genuinely
-                # nested real link in between (e.g. a File: link whose
-                # caption itself contains an actual [[link]]), rather
-                # than mistaking that inner link's own close for the
-                # outer one's.
-                pseudo = '[[' + text[j:]
-                match = next(iter(findBalanced(pseudo, ['[['], [']]'])), None)
-                if match is not None:
-                    _, pseudo_end = match
-                    close_pos = j + (pseudo_end - 2) - 2
-                    k = close_pos + 2
-                    trailing_closes = 0
-                    while k < n and text[k] == ']' and trailing_closes < excess:
-                        trailing_closes += 1
-                        k += 1
-                    if trailing_closes == excess:
-                        result.append('[[')
-                        result.append(text[j:close_pos + 2])
-                        i = close_pos + 2 + excess
-                        continue
-                # Fallback: collapse just the opens; the closing side
-                # is left as-is (may leave a small residue, same as
-                # not attempting the symmetric case at all).
+    pos = 0
+    while True:
+        m = _tripleOpenRE.search(text, pos)
+        if not m:
+            break
+        i, j = m.start(), m.end()
+        if i < cur:
+            # This run sits inside content already emitted as part of
+            # a previous occurrence's processed output (e.g. a nested
+            # run inside a caption we already consumed) -- skip it
+            # rather than reprocessing already-handled text.
+            pos = cur
+            continue
+        result.append(text[cur:i])
+        open_run = j - i
+        excess = open_run - 2
+        # Find where a normal, correctly-nested single link
+        # starting at position j would naturally close, using
+        # findBalanced() itself rather than a naive first-']]'
+        # scan -- this correctly skips over any genuinely
+        # nested real link in between (e.g. a File: link whose
+        # caption itself contains an actual [[link]]), rather
+        # than mistaking that inner link's own close for the
+        # outer one's.
+        #
+        # text[j-2:j] is already "[[" (the last two characters
+        # of the run of 3+ opens we just matched), so slicing
+        # from j-2 gives the same "starts with [[" property as
+        # concatenating a synthetic '[[' prefix onto text[j:]
+        # would, but as a single slice rather than a second
+        # string-building step.
+        pseudo = text[j - 2:]
+        match = next(findBalanced(pseudo, _LINK_OPEN_DELIM, _LINK_CLOSE_DELIM), None)
+        if match is not None:
+            _, pseudo_end = match
+            close_pos = j + (pseudo_end - 2) - 2
+            k = close_pos + 2
+            trailing_closes = 0
+            while k < n and text[k] == ']' and trailing_closes < excess:
+                trailing_closes += 1
+                k += 1
+            if trailing_closes == excess:
                 result.append('[[')
-                i = j
+                result.append(text[j:close_pos + 2])
+                cur = close_pos + 2 + excess
+                pos = cur
                 continue
-        result.append(text[i])
-        i += 1
+        # Fallback: collapse just the opens; the closing side
+        # is left as-is (may leave a small residue, same as
+        # not attempting the symmetric case at all).
+        result.append('[[')
+        cur = j
+        pos = j
+    result.append(text[cur:])
+    return ''.join(result)
     return ''.join(result)
 
 
 _bracketPairRE = re.compile(r'\[\[|\]\]')
+_tripleOpenRE = re.compile(r'\[{3,}')
+
+# Reused by collapseDoubledLinkBrackets()'s pseudo-prefix findBalanced()
+# call below -- allocated once at module load rather than as fresh list
+# objects on every call.
+_LINK_OPEN_DELIM = ['[[']
+_LINK_CLOSE_DELIM = [']]']
 
 
 def findUnclosedLinkOpenPositions(text):
@@ -1804,11 +1840,16 @@ def findMatchingBraces(text, ldelim=0):
                 cur = end
 
 
-def findBalanced(text, openDelim, closeDelim):
+def findBalanced(text, openDelim, closeDelim, search_start=0):
     """
     Assuming that text contains a properly balanced expression using
     :param openDelim: as opening delimiters and
     :param closeDelim: as closing delimiters.
+    :param search_start: character position to begin searching from
+      (default 0, i.e. the whole text). Useful for scanning from
+      partway through a large string without copying/slicing it first --
+      regex .search(text, pos) already supports an arbitrary start
+      position natively, without any copy.
     :return: an iterator producing pairs (start, end) of start and end
     positions in text containing a balanced expression.
     """
@@ -1817,7 +1858,7 @@ def findBalanced(text, openDelim, closeDelim):
     afterPat = {o: re.compile(openPat + '|' + c, re.DOTALL) for o, c in zip(openDelim, closeDelim)}
     stack = []
     start = 0
-    cur = 0
+    cur = search_start
     # end = len(text)
     startSet = False
     startPat = re.compile(openPat)
