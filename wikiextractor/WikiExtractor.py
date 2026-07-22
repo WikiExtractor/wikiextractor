@@ -163,6 +163,9 @@ class OutputSplitter():
         self.nextFile = nextFile
         self.compress = compress
         self.max_file_size = max_file_size
+        self.file = None
+
+    def open_file(self):
         self.file = self.open(self.nextFile.next())
 
     def reserve(self, size):
@@ -184,7 +187,7 @@ class OutputSplitter():
         if self.compress:
             return bz2.BZ2File(filename + '.bz2', 'w')
         else:
-            return open(filename, 'w')
+            return open(filename, 'w', encoding='utf-8')
 
 
 # ----------------------------------------------------------------------
@@ -466,8 +469,6 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # wait for it to finish
     reduce.join()
 
-    if output != sys.stdout:
-        output.close()
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
     logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
@@ -503,6 +504,9 @@ def reduce_process(output_queue, output):
     :param output: file object where to print.
     """
 
+    if isinstance(output, OutputSplitter):
+        output.open_file()
+
     interval_start = default_timer()
     period = 100000
     # FIXME: use a heap
@@ -525,6 +529,9 @@ def reduce_process(output_queue, output):
                 break
             ordinal, text = pair
             ordering_buffer[ordinal] = text
+
+    if isinstance(output, OutputSplitter):
+        output.close()
 
 
 # ----------------------------------------------------------------------
