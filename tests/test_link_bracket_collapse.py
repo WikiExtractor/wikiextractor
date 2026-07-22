@@ -160,15 +160,27 @@ class NormalLinkRegressionTests(unittest.TestCase):
         result = ex.replaceInternalLinks(text)
         self.assertEqual(result, "پاکستانبھارت")
 
-    def test_log_paste_with_space_separated_brackets_untouched(self):
+    def test_log_paste_second_link_processed_independently_of_first_unclosed_bracket(self):
         # Real example from Sindhi Wikipedia: a maintenance-script log
-        # pasted into a page, containing "[[ [[" with a space between --
-        # genuinely unrelated to the doubled-bracket typo, and must be
-        # left completely alone (the fix only triggers on immediately
-        # adjacent brackets with zero separator).
+        # pasted into a page, containing "[[ [[" -- the first "[[" is
+        # genuinely unclosed (2 opens, only 1 close in this snippet),
+        # unrelated to the doubled-bracket-typo pattern this module
+        # targets. Before neutralizeUnclosedLinkOpens() existed, that
+        # one unclosed bracket coincidentally poisoned everything after
+        # it too, leaving the whole line untouched -- but that was
+        # never verified as "correct", just whatever the old bug
+        # happened to produce. Now the genuinely unclosed first
+        # bracket is correctly isolated, and the second, structurally
+        # well-formed link gets processed on its own merit -- and
+        # since "وڪيپيڊيا" (localized Wikipedia-namespace prefix) isn't
+        # in acceptedNamespaces, it correctly drops to '', same as any
+        # other non-accepted-namespace link. This is more accurate,
+        # not a regression: real MediaWiki's parser doesn't know this
+        # text is "log output" either, and would also attempt to
+        # process that second link on its own.
         text = "dbk=[[ [[وڪيپيڊيا:اسان_سان_رابطو_ڪريو]] -> foo"
         result = ex.replaceInternalLinks(text)
-        self.assertEqual(result, text)
+        self.assertEqual(result, "dbk=[[  -> foo")
 
 
 class LegitimateNestedLinkRegressionTests(unittest.TestCase):
@@ -268,6 +280,113 @@ class DoubledBracketWithGenuineNestingTests(unittest.TestCase):
         text = "[[[[Some Page|caption with a [[real link]] inside]]]]"
         result = ex.replaceInternalLinks(text)
         self.assertEqual(result, "caption with a [[real link]] inside")
+
+
+class UnclosedLinkOpenTests(unittest.TestCase):
+    """A single genuinely unclosed link opening (e.g. [[1198 -- an
+    ordinary, easy-to-make typo: forgetting the closing "]]") should
+    not poison findBalanced()'s stack for the rest of the article.
+    Before neutralizeUnclosedLinkOpens() existed, one such typo
+    anywhere would silently disable ALL subsequent link conversion,
+    even for several unrelated, perfectly well-formed links much
+    later in the same article -- found in the wild on a real Saraiki
+    Wikipedia article ("ابن رشد" / Averroes, id 296).
+
+    Detection is deliberately NOT bounded to a single paragraph. An
+    earlier version bounded it that way specifically to avoid a
+    genuinely unclosed bracket accidentally pairing with an unrelated
+    stray "]]" much later in the same article -- but that turned out
+    to cause a worse, CONFIRMED problem: a real File: link (English
+    Wikipedia, "Asterix", id 2101) has a <ref>...</ref> citation nested
+    in its image caption that itself contains a genuine blank line
+    before its closing tag (untidy but entirely legitimate wikitext).
+    Paragraph-bounding incorrectly treated the File: link's opening as
+    unclosed, since its true closing "]]" was one blank line away --
+    causing the whole link to survive as literal text instead of being
+    cleanly dropped, which is what it correctly does without this fix
+    at all. See test_real_asterix_file_link_with_blank_line_in_ref
+    below.
+    """
+
+    def test_real_asterix_file_link_with_blank_line_in_ref(self):
+        # Real example from English Wikipedia ("Asterix", id 2101): a
+        # File: link's caption contains a nested real link AND a
+        # <ref>...</ref> citation with a genuine blank line inside it,
+        # before the outer File: link's own closing "]]". The whole
+        # File: link (including the nested link inside its caption)
+        # must still be dropped entirely, exactly as it is without any
+        # of this fix -- and the later, unrelated links in the
+        # following paragraph must also correctly convert.
+        text = (
+            "==Publication history==\n"
+            "[[File:Evariste-Vital Luminais - Goths traversant une rivière.jpg"
+            "|thumb|[[Évariste Vital Luminais]]' (1821\u20131896) paintings of Goths "
+            "had been rather popular in France and are a possible model for the "
+            "''Asterix'' series.<ref>{{Cite book|title = Luminais Musée des "
+            "beaux-arts|publisher = Dominique Dussol: Evariste Vital|year = 2002"
+            "|page = 32}}\n\n&nbsp;\n</ref>]]\n"
+            "Prior to creating the ''Asterix'' series, Goscinny and Uderzo had "
+            "had success with their series ''[[Oumpah-pah]]'', which was "
+            "published in ''[[Tintin (magazine)|Tintin]]'' magazine."
+        )
+        result = ex.replaceInternalLinks(text)
+
+        self.assertNotIn("[[File:", result)
+        self.assertNotIn("Évariste Vital Luminais", result)  # dropped along with the whole File: link
+        self.assertIn("Oumpah-pah", result)
+        self.assertNotIn("[[Oumpah-pah", result)
+        self.assertIn("Tintin", result)
+        self.assertNotIn("[[Tintin", result)
+
+    def test_real_ibn_rushd_example_recovers_all_later_links(self):
+        # Real example from Saraiki Wikipedia. The malformed [[1198ء)
+        # (missing its closing "]]") must stay exactly as broken as it
+        # was, while فلکیات and مذہب -- perfectly well-formed links
+        # appearing later in the same text -- must now correctly
+        # convert instead of being silently swallowed.
+        text = (
+            "وفات: 10 دسمبر [[1198ء) مسلم فلسفی، ماہر [[فلکیات]] تے مقنن ہن۔\n"
+            "[[مذہب]] تے فلسفیانہ حقیقت"
+        )
+        result = ex.replaceInternalLinks(text)
+
+        self.assertIn("[[1198ء)", result)  # left exactly as broken
+        self.assertIn("فلکیات", result)
+        self.assertNotIn("[[فلکیات", result)
+        self.assertIn("مذہب", result)
+        self.assertNotIn("[[مذہب", result)
+
+    def test_unclosed_open_does_not_affect_an_earlier_closed_link(self):
+        # The precise-detection check: a properly closed link BEFORE
+        # the genuinely unclosed one must not be misidentified as the
+        # broken one. A naive "neutralize the first N excess opens"
+        # heuristic would get this wrong.
+        text = "[[A]] and [[B stays open"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "A and [[B stays open")
+
+    def test_multiple_well_formed_links_after_an_unclosed_one_all_recover(self):
+        text = "[[broken (no close and [[first]] and [[second]] and [[third]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertIn("[[broken (no close", result)
+        self.assertIn("first", result)
+        self.assertNotIn("[[first", result)
+        self.assertIn("second", result)
+        self.assertNotIn("[[second", result)
+        self.assertIn("third", result)
+        self.assertNotIn("[[third", result)
+
+    def test_unclosed_bracket_with_no_match_anywhere_does_not_affect_a_later_real_link(self):
+        # Note: this text happens to contain a blank line between the
+        # two parts, but that's not what makes it work -- "[[unclosed"
+        # has no matching "]]" anywhere in this text at all (not just
+        # within its own paragraph), so it's correctly identified as
+        # genuinely unclosed regardless of paragraph boundaries.
+        text = "First paragraph has [[unclosed (no close here\n\nSecond paragraph has [[a real link]] in it"
+        result = ex.replaceInternalLinks(text)
+        self.assertIn("[[unclosed", result)
+        self.assertIn("a real link", result)
+        self.assertNotIn("[[a real link", result)
 
 
 if __name__ == '__main__':
