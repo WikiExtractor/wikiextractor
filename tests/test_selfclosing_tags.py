@@ -1,36 +1,65 @@
 """
-Tests for two related br/hr fixes:
+Tests for self-closing/void-element tag handling in extract.py:
+br, hr, nobr, ref, references, nowiki, templatestyles. All of these
+share the same underlying mechanism (selfClosingTags/lineBreakTags,
+selfClosing_tag_patterns/lineBreak_tag_patterns, and the shared
+tag-processing loop in clean()), which is why they're tested together
+here rather than split across files -- a change to that shared
+mechanism (as several of the fixes below were) has to be checked
+against all of them at once anyway.
 
-1. Missing-trailing-slash matching (selfClosing_tag_patterns /
-   lineBreak_tag_patterns): old-style HTML4 syntax like <br clear=all>
-   (no trailing slash) previously never matched at all, surviving into
-   extracted text HTML-escaped as literal "&lt;br clear=all&gt;". A
-   bare <br> with no attributes had exactly the same problem.
+Fixes covered:
 
-2. Word-merging on deletion (this file's main focus): even where a
-   br/hr tag WAS correctly matched, it was deleted with nothing
-   substituted in its place (dropSpans() just concatenates the text on
-   either side of a removed span). If there was no surrounding
-   whitespace in the source -- a real, confirmed case on Saraiki
-   Wikipedia, "اُٹھا<br>رب" with no spaces at all around the tag --
-   deleting it merges two separate words into one ("اُٹھارب").
+1. Missing-trailing-slash matching: old-style HTML4 syntax like
+   <br clear=all> (no trailing slash) previously never matched at
+   all for br/hr/nobr, surviving into extracted text HTML-escaped as
+   literal "&lt;br clear=all&gt;". A bare <br> with no attributes had
+   exactly the same problem.
 
-The fix: br/hr are pulled out into their own lineBreakTags group,
-matched with the same permissive (optional trailing slash) pattern as
-before, but substituted with a single space instead of being folded
-into the generic drop-with-nothing spans mechanism.
+2. Word-merging on deletion (br/hr specifically): even where a br/hr
+   tag WAS correctly matched, it was deleted with nothing substituted
+   in its place (dropSpans() just concatenates the text on either
+   side of a removed span). If there was no surrounding whitespace in
+   the source -- a real, confirmed case on Saraiki Wikipedia,
+   "اُٹھا<br>رب" with no spaces at all around the tag -- deleting it
+   merges two separate words into one ("اُٹھارب"). Fixed by
+   substituting a space instead of deleting outright.
 
-nobr/ref/references/nowiki are NOT affected by the space-substitution
-part of this fix (see RefTagSafetyTests / NobrTagTests below):
-"no line break" doesn't call for inserting a space where the tag was,
-and ref's self-closing form has a distinct, real meaning from its
-paired form (see test_br_tag_handling's sibling investigation) that
-must not be disturbed.
+3. Boundary-awareness (br/hr specifically): the space-substitution
+   fix above should not add a space when the tag sits at the start/end
+   of a line -- there's nothing on the empty side to merge with, and
+   doing so anyway creates an invisible leading/trailing space that
+   clutters diffs without affecting meaning (a real large diff on
+   Saraiki Wikipedia showed many lines as "changed" while looking
+   completely identical, for exactly this reason). Checking for ANY
+   adjacent whitespace (not just newline) also matters here: without
+   it, the substitution function isn't self-sufficient and can
+   produce a double space on its own when the source already had one
+   space adjacent to the tag.
+
+4. templatestyles (a real MediaWiki extension tag that loads CSS
+   styling for a template's rendering -- pure presentational
+   metadata, never wraps real article prose) was previously
+   unhandled entirely and survived into extracted text HTML-escaped,
+   e.g. "&lt;templatestyles src=\"حوالے/styles.css\" /&gt;". Added to
+   selfClosingTags for pure deletion (no useful content to preserve,
+   and no space-substitution justification the way br/hr have).
+
+Critically, ref/references/nowiki deliberately keep the strict
+"slash required" matching pattern: for ref specifically, the
+self-closing form has a real, distinct meaning (e.g. <ref name="x" />
+reuses an earlier-defined reference) from the non-self-closing form
+(<ref name="x">actual citation text</ref>, a genuine paired tag with
+real content) -- making the slash optional for these would
+misidentify the OPENING of a real paired tag as if it were
+self-closing. This was verified directly: doing so naively DOES cause
+a real paired ref tag's opening to falsely match. See
+RefTagSafetyTests.
 
 Run with:
-    python -m unittest tests.test_br_tag_handling -v
+    python -m unittest tests.test_selfclosing_tags -v
 or, from the tests/ directory:
-    python -m unittest test_br_tag_handling -v
+    python -m unittest test_selfclosing_tags -v
 """
 
 import sys
