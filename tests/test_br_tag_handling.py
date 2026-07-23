@@ -182,6 +182,50 @@ class NobrTagTests(VoidElementTestCase):
         self.assertEqual(result, ["wordword"])
 
 
+class LineBoundaryTests(VoidElementTestCase):
+    """A line-break tag sitting at the very start/end of a line (or
+    the whole text) should not get a space substituted on that side --
+    there's nothing on the empty side to merge with, so adding one
+    just creates an invisible leading/trailing space that clutters
+    diffs without affecting meaning. This is what a real large diff on
+    Saraiki Wikipedia surfaced: many lines showing as "changed" in a
+    diff while looking completely identical, because of an invisible
+    trailing space where a <br/> had been at the end of the line.
+    """
+
+    def test_br_at_very_start_of_text_no_leading_space(self):
+        text = "<br>Line one."
+        result = self.get_result(text)
+        self.assertEqual(result, ["Line one."])
+
+    def test_br_at_very_end_of_text_no_trailing_space(self):
+        text = "Line one.<br>"
+        result = self.get_result(text)
+        self.assertEqual(result, ["Line one."])
+
+    def test_br_immediately_after_a_newline_no_leading_space(self):
+        text = "Line one.\n<br>Line two."
+        result = self.get_result(text)
+        self.assertEqual(result, ["Line one.", "Line two."])
+
+    def test_br_immediately_before_a_newline_no_trailing_space(self):
+        text = "Line one.<br>\nLine two."
+        result = self.get_result(text)
+        self.assertEqual(result, ["Line one.", "Line two."])
+
+    def test_br_alone_on_its_own_line(self):
+        text = "Line one.\n<br>\nLine two."
+        result = self.get_result(text)
+        self.assertEqual(result, ["Line one.", "Line two."])
+
+    def test_middle_of_line_still_gets_a_space(self):
+        # The regression check: boundary-awareness must not accidentally
+        # disable the original word-merging fix for the common case.
+        text = "وطنوں اُٹھا<br>رب جانڑے"
+        result = self.get_result(text)
+        self.assertEqual(result, ["وطنوں اُٹھا رب جانڑے"])
+
+
 class UnrelatedTagHandlingUnaffectedTests(VoidElementTestCase):
     """Sanity check that ignoredTags (b, i, nowiki, etc.) -- an
     entirely separate code path -- are unaffected by either fix.

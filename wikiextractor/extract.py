@@ -136,10 +136,16 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     # whitespace in the source (a real, confirmed case on Saraiki
     # Wikipedia: "اُٹھا<br>رب" with no spaces at all around the tag,
     # which would otherwise become "اُٹھارب" -- two words fused into
-    # one). Substitute these with a space directly, rather than
-    # folding them into the generic drop-with-nothing spans below.
+    # one). Substitute these with a space, but only where there's
+    # actually something to merge with on both sides -- a line-break
+    # tag sitting at the very start/end of a line (immediately next to
+    # a newline, or at the start/end of the text) needs no additional
+    # separator, since there's nothing on the empty side to merge
+    # with; adding one there just creates an invisible leading or
+    # trailing space that doesn't affect meaning but does clutter
+    # every diff against such a line.
     for pattern in lineBreak_tag_patterns:
-        text = pattern.sub(' ', text)
+        text = substituteLineBreakTag(pattern, text)
 
     # Drop self-closing tags
     for pattern in selfClosing_tag_patterns:
@@ -803,6 +809,32 @@ lineBreak_tag_patterns = [
     re.compile(r'<\s*%s\b[^>]*/?\s*>' % tag, re.DOTALL | re.IGNORECASE)
     for tag in lineBreakTags
 ]
+
+
+def substituteLineBreakTag(pattern, text):
+    """
+    Replace each match of a line-break tag pattern (br/hr) with a
+    space, EXCEPT when the match sits at the very start/end of the
+    text or is already adjacent to a newline on one side -- in that
+    case, omit the space on that side entirely, since there's nothing
+    on the empty side to merge with. Prevents adding an invisible
+    leading/trailing space to a line that only clutters diffs without
+    affecting meaning.
+    """
+    result = []
+    cur = 0
+    n = len(text)
+    for m in pattern.finditer(text):
+        if m.start() < cur:
+            continue  # overlapping match already consumed
+        result.append(text[cur:m.start()])
+        before_is_boundary = (m.start() == 0) or (text[m.start() - 1] == '\n')
+        after_is_boundary = (m.end() == n) or (text[m.end()] == '\n')
+        if not (before_is_boundary or after_is_boundary):
+            result.append(' ')
+        cur = m.end()
+    result.append(text[cur:])
+    return ''.join(result)
 
 # Match HTML placeholder tags
 placeholder_tag_patterns = [
