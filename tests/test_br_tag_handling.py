@@ -238,6 +238,25 @@ class LineBoundaryTests(VoidElementTestCase):
         self.assertEqual(result, "text more")
 
 
+class TemplateStylesTests(VoidElementTestCase):
+    """<templatestyles src="..." /> is a real MediaWiki extension tag
+    that loads CSS styling for a template's rendering -- pure
+    presentational metadata, never wraps real article prose, and is
+    always used in self-closing form in practice. Found surviving
+    untouched (HTML-escaped) in real Saraiki Wikipedia output.
+    """
+
+    def test_real_reported_example(self):
+        text = 'Some real text. <templatestyles src="حوالے/styles.css" /> More text.'
+        result = self.get_result(text)
+        self.assertEqual(result, ["Some real text. More text."])
+
+    def test_no_surrounding_whitespace_in_source(self):
+        text = 'Some real text.<templatestyles src="Template:Foo/styles.css"/>More text.'
+        result = self.get_result(text)
+        self.assertEqual(result, ["Some real text.More text."])
+
+
 class UnrelatedTagHandlingUnaffectedTests(VoidElementTestCase):
     """Sanity check that ignoredTags (b, i, nowiki, etc.) -- an
     entirely separate code path -- are unaffected by either fix.

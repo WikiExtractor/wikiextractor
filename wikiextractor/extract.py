@@ -679,7 +679,7 @@ magicWordsRE = re.compile('|'.join(MagicWords.switches))
 # ------------------------------------------------------------------------------
 
 lineBreakTags = ('br', 'hr')
-selfClosingTags = ('nobr', 'ref', 'references', 'nowiki')
+selfClosingTags = ('nobr', 'ref', 'references', 'nowiki', 'templatestyles')
 
 # These tags are dropped, keeping their content.
 # handle 'a' separately, depending on keepLinks
@@ -787,13 +787,17 @@ selfClosing_tag_patterns = [
     # the tag was, so it stays in the pure-deletion group below rather
     # than moving to lineBreak_tag_patterns.
     #
-    # ref/references/nowiki are NOT treated this way: for these, the
-    # self-closing form has a distinct, real meaning (e.g. <ref
-    # name="x" /> reuses an earlier-defined reference) from the
-    # non-self-closing form (<ref name="x">actual citation text</ref>,
-    # a genuine paired tag with real content). Making the slash
-    # optional for these would misidentify the OPENING of a real
-    # paired tag as if it were self-closing.
+    # ref/references/nowiki/templatestyles are NOT treated this way:
+    # for ref specifically, the self-closing form has a distinct, real
+    # meaning (e.g. <ref name="x" /> reuses an earlier-defined
+    # reference) from the non-self-closing form (<ref
+    # name="x">actual citation text</ref>, a genuine paired tag with
+    # real content) -- making the slash optional would misidentify the
+    # OPENING of a real paired tag as if it were self-closing.
+    # templatestyles is always used in self-closing form in real
+    # MediaWiki usage (it loads CSS for a template's rendering, never
+    # wraps real content), so the strict pattern doesn't lose anything
+    # for it either.
     re.compile(r'<\s*%s\b[^>]*/?\s*>' % tag if tag == 'nobr'
                else r'<\s*%s\b[^>]*/\s*>' % tag,
                re.DOTALL | re.IGNORECASE)
