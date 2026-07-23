@@ -815,11 +815,24 @@ def substituteLineBreakTag(pattern, text):
     """
     Replace each match of a line-break tag pattern (br/hr) with a
     space, EXCEPT when the match sits at the very start/end of the
-    text or is already adjacent to a newline on one side -- in that
-    case, omit the space on that side entirely, since there's nothing
-    on the empty side to merge with. Prevents adding an invisible
-    leading/trailing space to a line that only clutters diffs without
-    affecting meaning.
+    text or is already adjacent to whitespace (any kind -- space, tab,
+    newline, non-breaking space -- not just newline specifically) on
+    one side -- in that case, omit the space on that side entirely,
+    since there's already something separating it from whatever's
+    there, or nothing at all to separate it from. Checking for any
+    whitespace rather than just newline matters: without it, this
+    function can produce a double space on its own when the source
+    already had one space adjacent to the tag (verified directly), and
+    isn't otherwise self-sufficient -- relying on some other,
+    unrelated part of the pipeline to clean up after it is fragile
+    compared to just not creating the extra space to begin with.
+
+    Verified this doesn't over-match invisible RTL-script formatting
+    characters that aren't real separators (e.g. zero-width
+    non-joiner/joiner, the Arabic letter mark, all common in the
+    Perso-Arabic-script wikis this project works with) -- Python's
+    str.isspace() correctly excludes those while still recognizing a
+    non-breaking space as a genuine (if non-wrapping) separator.
     """
     result = []
     cur = 0
@@ -828,8 +841,8 @@ def substituteLineBreakTag(pattern, text):
         if m.start() < cur:
             continue  # overlapping match already consumed
         result.append(text[cur:m.start()])
-        before_is_boundary = (m.start() == 0) or (text[m.start() - 1] == '\n')
-        after_is_boundary = (m.end() == n) or (text[m.end()] == '\n')
+        before_is_boundary = (m.start() == 0) or text[m.start() - 1].isspace()
+        after_is_boundary = (m.end() == n) or text[m.end()].isspace()
         if not (before_is_boundary or after_is_boundary):
             result.append(' ')
         cur = m.end()

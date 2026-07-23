@@ -225,6 +225,18 @@ class LineBoundaryTests(VoidElementTestCase):
         result = self.get_result(text)
         self.assertEqual(result, ["وطنوں اُٹھا رب جانڑے"])
 
+    def test_existing_single_space_before_tag_no_double_space(self):
+        # A plain space (not a newline) already adjacent to the tag
+        # must count as a boundary too -- otherwise this function can
+        # produce a double space on its own, relying on some other,
+        # unrelated part of the pipeline to clean it up afterward.
+        result = ex.substituteLineBreakTag(ex.lineBreak_tag_patterns[0], "text <br>more")
+        self.assertEqual(result, "text more")
+
+    def test_existing_single_space_after_tag_no_double_space(self):
+        result = ex.substituteLineBreakTag(ex.lineBreak_tag_patterns[0], "text<br> more")
+        self.assertEqual(result, "text more")
+
 
 class UnrelatedTagHandlingUnaffectedTests(VoidElementTestCase):
     """Sanity check that ignoredTags (b, i, nowiki, etc.) -- an
