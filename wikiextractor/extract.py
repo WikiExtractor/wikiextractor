@@ -130,6 +130,17 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     for m in comment.finditer(text):
         spans.append((m.start(), m.end()))
 
+    # br/hr carry genuine line-break semantics: unlike a comment or a
+    # citation marker, deleting one with nothing in its place can
+    # merge two adjacent words together if there was no surrounding
+    # whitespace in the source (a real, confirmed case on Saraiki
+    # Wikipedia: "اُٹھا<br>رب" with no spaces at all around the tag,
+    # which would otherwise become "اُٹھارب" -- two words fused into
+    # one). Substitute these with a space directly, rather than
+    # folding them into the generic drop-with-nothing spans below.
+    for pattern in lineBreak_tag_patterns:
+        text = pattern.sub(' ', text)
+
     # Drop self-closing tags
     for pattern in selfClosing_tag_patterns:
         for m in pattern.finditer(text):
@@ -661,7 +672,8 @@ magicWordsRE = re.compile('|'.join(MagicWords.switches))
 
 # ------------------------------------------------------------------------------
 
-selfClosingTags = ('br', 'hr', 'nobr', 'ref', 'references', 'nowiki')
+lineBreakTags = ('br', 'hr')
+selfClosingTags = ('nobr', 'ref', 'references', 'nowiki')
 
 # These tags are dropped, keeping their content.
 # handle 'a' separately, depending on keepLinks
@@ -762,7 +774,34 @@ for tag in ignoredTags:
 
 # Match selfClosing HTML tags
 selfClosing_tag_patterns = [
-    re.compile(r'<\s*%s\b[^>]*/\s*>' % tag, re.DOTALL | re.IGNORECASE) for tag in selfClosingTags
+    # nobr is treated the same permissive way as br/hr for matching
+    # purposes (optional trailing slash), since a bare, unclosed
+    # <nobr> is the same kind of stray/orphaned tag -- but unlike
+    # br/hr, "no line break" doesn't call for inserting a space where
+    # the tag was, so it stays in the pure-deletion group below rather
+    # than moving to lineBreak_tag_patterns.
+    #
+    # ref/references/nowiki are NOT treated this way: for these, the
+    # self-closing form has a distinct, real meaning (e.g. <ref
+    # name="x" /> reuses an earlier-defined reference) from the
+    # non-self-closing form (<ref name="x">actual citation text</ref>,
+    # a genuine paired tag with real content). Making the slash
+    # optional for these would misidentify the OPENING of a real
+    # paired tag as if it were self-closing.
+    re.compile(r'<\s*%s\b[^>]*/?\s*>' % tag if tag == 'nobr'
+               else r'<\s*%s\b[^>]*/\s*>' % tag,
+               re.DOTALL | re.IGNORECASE)
+    for tag in selfClosingTags
+]
+
+# br/hr carry genuine line-break semantics (see the substitution site
+# in clean() above): matched the same permissive way as nobr (trailing
+# slash optional, since old-style HTML4 syntax like <br clear=all> --
+# or even a bare <br> -- is just as valid a "line break" instance as
+# <br/>), but substituted with a space instead of bulk-deleted.
+lineBreak_tag_patterns = [
+    re.compile(r'<\s*%s\b[^>]*/?\s*>' % tag, re.DOTALL | re.IGNORECASE)
+    for tag in lineBreakTags
 ]
 
 # Match HTML placeholder tags
