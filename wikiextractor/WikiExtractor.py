@@ -63,6 +63,7 @@ import logging
 import os.path
 import re  # TODO use regex when it will be standard
 import sys
+import time
 from io import StringIO
 from multiprocessing import Queue, get_context, cpu_count
 from timeit import default_timer
@@ -340,7 +341,7 @@ def collect_pages(text):
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe, expand_templates=True):
+                 process_count, html_safe, expand_templates=True, page_timing=False):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -350,6 +351,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param process_count: number of extraction processes to spawn.
     :html_safe: whether to convert entities in text to HTML.
     :param expand_templates: whether to expand templates.
+    :param page_timing: whether to log each page's wall-clock start/finish/elapsed time.
     """
     global knownNamespaces
     global templateNamespace
@@ -418,7 +420,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
     # Reduce job that sorts and prints output
     reduce = Process(target=reduce_process,
-                      args=(output_queue, out_file, file_size, file_compress))
+                      args=(output_queue, out_file, file_size, file_compress, page_timing))
     reduce.start()
 
     # initialize jobs queue
@@ -429,7 +431,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, html_safe))
+                            args=(jobs_queue, output_queue, html_safe, page_timing))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
@@ -469,17 +471,42 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, html_safe):
+def extract_process(jobs_queue, output_queue, html_safe, page_timing=False):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
     :html_safe: whether to convert entities in text to HTML.
+    :param page_timing: whether to log each page's wall-clock start/finish/elapsed
+        time. Two lines per page (PAGE_START when a worker begins it, PAGE_TIMING
+        when it finishes), logged at INFO level (no --debug needed) -- useful for
+        isolating a specific slow/stuck page when extraction seems to hang: sort
+        PAGE_TIMING lines by elapsed time to spot an outlier directly, or, for a
+        page that never finishes at all (no amount of waiting produces a matching
+        PAGE_TIMING line for it), find that worker's PID's last PAGE_START line --
+        that's exactly the page it's stuck on, with no need to infer it from
+        surrounding pages or wait to see whether it was "just slow".
     """
     while True:
-        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page)
+        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
         if job:
+            if page_timing:
+                page_id, _, _, title, _, ordinal = job
+                start = time.time()
+                logging.info(
+                    "PAGE_START pid=%d ordinal=%d id=%s title=%r start=%s",
+                    os.getpid(), ordinal, page_id, title,
+                    time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start)))
             out = StringIO()  # memory buffer
             Extractor(*job[:-1]).extract(out, html_safe)  # (id, urlbase, title, page)
+            if page_timing:
+                finish = time.time()
+                logging.info(
+                    "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r "
+                    "start=%s finish=%s elapsed=%.2fs",
+                    os.getpid(), ordinal, page_id, title,
+                    time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start)),
+                    time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish)),
+                    finish - start)
             text = out.getvalue()
             output_queue.put((job[-1], text))  # (ordinal, extracted_text)
             out.close()
@@ -487,13 +514,16 @@ def extract_process(jobs_queue, output_queue, html_safe):
             break
 
 
-def reduce_process(output_queue, out_file, file_size, file_compress):
+def reduce_process(output_queue, out_file, file_size, file_compress, page_timing=False):
     """
     Pull finished article text, write series of files (or stdout)
     :param output_queue: text to be output.
     :param out_file: path to write output to, or '-' for stdout.
     :param file_size: max size per output file (see OutputSplitter).
     :param file_compress: whether to bzip2-compress output files.
+    :param page_timing: whether to log REDUCER_PROGRESS for every page
+        written (ordinal, current buffer depth, timestamp) -- shares
+        the same flag as the workers' PAGE_START/PAGE_TIMING logging.
 
     Builds its own output/OutputSplitter here, rather than receiving
     an already-open one constructed by the parent process: an open
@@ -505,6 +535,9 @@ def reduce_process(output_queue, out_file, file_size, file_compress):
     workaround, and this process opening (and, importantly, properly
     closing) the file itself is also what fixes a separate real bug:
     see the comment on close() below.
+
+    On exit, always logs the status of the exit (except in the case
+    of a SIGKILL)
     """
     if out_file == '-':
         output = sys.stdout
@@ -525,6 +558,11 @@ def reduce_process(output_queue, out_file, file_size, file_compress):
             if next_ordinal in ordering_buffer:
                 output.write(ordering_buffer.pop(next_ordinal))
                 next_ordinal += 1
+                if page_timing:
+                    logging.info(
+                        "REDUCER_PROGRESS ordinal=%d buffered=%d time=%s",
+                        next_ordinal - 1, len(ordering_buffer),
+                        time.strftime('%Y-%m-%d %H:%M:%S'))
                 # progress report
                 if next_ordinal % period == 0:
                     interval_rate = period / (default_timer() - interval_start)
@@ -539,6 +577,25 @@ def reduce_process(output_queue, out_file, file_size, file_compress):
                 ordinal, text = pair
                 ordering_buffer[ordinal] = text
     finally:
+        # Always logged (not gated by page_timing): whether this
+        # process is exiting cleanly (every buffered page successfully
+        # written, nothing left over) or with pages still stuck in
+        # ordering_buffer -- which would mean the sentinel arrived
+        # while next_ordinal's own entry had still never shown up on
+        # output_queue at all, a real, distinct problem from a page
+        # merely being slow. If this process gets SIGKILLed instead of
+        # exiting through this path at all, this line simply never
+        # appears -- the absence of it, following the last
+        # REDUCER_PROGRESS line, is itself the signal.
+        if ordering_buffer:
+            logging.warning(
+                "REDUCER_EXIT incomplete: next_ordinal=%d, %d page(s) still "
+                "buffered and never written: ordinals=%s",
+                next_ordinal, len(ordering_buffer),
+                sorted(ordering_buffer.keys())[:20])
+        else:
+            logging.info("REDUCER_EXIT clean: wrote %d article(s) total",
+                         next_ordinal)
         # This process's own writes are buffered in its own memory.
         # Since this process now opens its own output itself (rather
         # than receiving an already-open copy from the parent), there
@@ -604,6 +661,17 @@ def main():
                         help="suppress reporting progress info")
     groupS.add_argument("--debug", action="store_true",
                         help="print debug info")
+    groupS.add_argument("--page_timing", action="store_true",
+                        help="log wall-clock start (PAGE_START) and finish/elapsed "
+                             "(PAGE_TIMING) time for every extracted page, at the "
+                             "default INFO log level -- does not require --debug, "
+                             "and is far less noisy. A page that never finishes "
+                             "still leaves its PAGE_START line behind, so a stuck "
+                             "worker's last page is identifiable even without "
+                             "waiting for it to complete. Useful for finding a "
+                             "specific slow or stuck page when extraction seems to "
+                             "hang: sort PAGE_TIMING lines by elapsed time to spot "
+                             "an outlier, or find a PID's dangling PAGE_START.")
     groupS.add_argument("-a", "--article", action="store_true",
                         help="analyze a file containing a single article (debug option)")
     groupS.add_argument("-v", "--version", action="version",
@@ -679,7 +747,8 @@ def main():
             return
 
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.html_safe, not args.no_templates)
+                 args.compress, args.processes, args.html_safe, not args.no_templates,
+                 args.page_timing)
 
 if __name__ == '__main__':
     main()
