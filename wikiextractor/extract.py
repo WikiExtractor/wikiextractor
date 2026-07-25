@@ -178,6 +178,26 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     for tag in discardElements:
         text = dropNested(text, r'<\s*%s\b[^>/]*>' % tag, r'<\s*/\s*%s>' % tag)
 
+    # Any <noinclude>/</noinclude> still remaining at this point is
+    # genuinely unmatched within this page's own text -- a properly
+    # paired instance would already have been removed, tags and
+    # content together, by the loop above. noinclude is a
+    # template-specific construct; its most likely source in a
+    # REGULAR article (not a template page) is misplaced markup a
+    # human editor accidentally copy-pasted directly from a template,
+    # confirmed on a real PNB Wikipedia article ("اربیم"/Erbium,
+    # id 113) where the closing tag appears BEFORE its "opening"
+    # counterpart -- structurally out of order, so they can never be
+    # matched to each other as a pair at all, no matter how the
+    # matching logic works. Rather than guess at what content was
+    # "supposed" to be wrapped (which the malformed, out-of-order
+    # source gives no reliable way to determine), just strip the
+    # literal tag text and leave everything else untouched --
+    # eliminates the visible raw-markup clutter without risking
+    # discarding real article content on a guess.
+    text = re.sub(r'<\s*noinclude\s*/?\s*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<\s*/\s*noinclude\s*>', '', text, flags=re.IGNORECASE)
+
     if not extractor.HtmlFormatting:
         # Turn into text what is left (&amp;nbsp;) and <syntaxhighlight>
         text = unescape(text)
