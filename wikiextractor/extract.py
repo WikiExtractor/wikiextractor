@@ -125,11 +125,6 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
 
     # Collect spans
 
-    spans = []
-    # Drop HTML comments
-    for m in comment.finditer(text):
-        spans.append((m.start(), m.end()))
-
     # br/hr carry genuine line-break semantics: unlike a comment or a
     # citation marker, deleting one with nothing in its place can
     # merge two adjacent words together if there was no surrounding
@@ -144,8 +139,25 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     # with; adding one there just creates an invisible leading or
     # trailing space that doesn't affect meaning but does clutter
     # every diff against such a line.
+    #
+    # This MUST run before any of the span-collecting steps below:
+    # substituteLineBreakTag() changes text's length (a longer tag
+    # collapses to a single space), so any span collected beforehand
+    # (comments, self-closing tags, ignored tags) would hold stale
+    # positions once dropSpans() later runs against the shifted text
+    # -- a real, confirmed bug found on a real Urdu Wikipedia article
+    # ("محمد علی جناح"/Muhammad Ali Jinnah, id 1086): two of six HTML
+    # comments after a br/hr substitution earlier in the article
+    # survived untouched, because dropSpans() ended up removing the
+    # wrong span of characters entirely, at positions that no longer
+    # corresponded to where those comments actually were.
     for pattern in lineBreak_tag_patterns:
         text = substituteLineBreakTag(pattern, text)
+
+    spans = []
+    # Drop HTML comments
+    for m in comment.finditer(text):
+        spans.append((m.start(), m.end()))
 
     # Drop self-closing tags
     for pattern in selfClosing_tag_patterns:
