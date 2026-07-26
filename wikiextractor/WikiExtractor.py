@@ -63,6 +63,7 @@ import logging
 import os.path
 import re  # TODO use regex when it will be standard
 import sys
+import threading
 import time
 from io import StringIO
 from multiprocessing import Queue, get_context, cpu_count
@@ -340,6 +341,40 @@ def collect_pages(text):
             redirect = False
 
 
+def safe_qsize(queue):
+    """
+    Queue.qsize() is documented as an unreliable approximation in
+    general, and specifically raises NotImplementedError on macOS due
+    to a sem_getvalue() limitation there -- returns None instead of
+    crashing the watchdog on that platform.
+    """
+    try:
+        return queue.qsize()
+    except NotImplementedError:
+        return None
+
+
+def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interval=60):
+    """
+    Periodically logs queue depths and process liveness, so a stalled
+    run can be diagnosed even during long stretches with no per-page
+    activity to log at all -- e.g. the mapper itself blocked on
+    jobs_queue.put() because no worker is consuming, or reduce_process
+    having been killed outright (an OOM kill, for instance, leaves no
+    trace in the per-page logging at all: see the REDUCER_EXIT
+    docstring in reduce_process() for why). is_alive() queries actual
+    OS process state directly, rather than inferring it from log
+    silence.
+    :param interval: seconds between checks.
+    """
+    while not stop_event.wait(interval):
+        alive_workers = sum(1 for w in workers if w.is_alive())
+        logging.info(
+            "WATCHDOG jobs_queue=%s output_queue=%s reduce_alive=%s workers_alive=%d/%d",
+            safe_qsize(jobs_queue), safe_qsize(output_queue),
+            reduce_proc.is_alive(), alive_workers, len(workers))
+
+
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
                  process_count, html_safe, expand_templates=True, page_timing=False):
     """
@@ -436,6 +471,14 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         extractor.start()
         workers.append(extractor)
 
+    watchdog_stop = threading.Event()
+    watchdog_thread = None
+    if page_timing:
+        watchdog_thread = threading.Thread(
+            target=watchdog, args=(jobs_queue, output_queue, reduce, workers, watchdog_stop),
+            daemon=True)
+        watchdog_thread.start()
+
     # Mapper process
 
     # we collect individual lines, since str.join() is significantly faster
@@ -445,6 +488,10 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     for id, revid, title, page in collect_pages(input):
         job = (id, revid, urlbase, title, page, ordinal)
         jobs_queue.put(job)  # goes to any available extract_process
+        if page_timing:
+            logging.info("JOB_QUEUED ordinal=%d id=%s title=%r time=%s",
+                         ordinal, id, title,
+                         time.strftime('%Y-%m-%d %H:%M:%S'))
         ordinal += 1
 
     input.close()
@@ -460,6 +507,10 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     output_queue.put(None)
     # wait for it to finish
     reduce.join()
+
+    watchdog_stop.set()
+    if watchdog_thread is not None:
+        watchdog_thread.join(timeout=5)
 
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
