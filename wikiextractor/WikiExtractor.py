@@ -401,14 +401,6 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         template_load_elapsed = default_timer() - template_load_start
         logging.info("Loaded %d templates in %.1fs", templates, template_load_elapsed)
 
-    if out_file == '-':
-        output = sys.stdout
-        if file_compress:
-            logging.warn("writing to stdout, so no output compression (use an external tool)")
-    else:
-        nextFile = NextFile(out_file)
-        output = OutputSplitter(nextFile, file_size, file_compress)
-
     # process pages
     logging.info("Starting page extraction from %s.", input_file)
     extract_start = default_timer()
@@ -425,7 +417,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     output_queue = Queue(maxsize=maxsize)
 
     # Reduce job that sorts and prints output
-    reduce = Process(target=reduce_process, args=(output_queue, output))
+    reduce = Process(target=reduce_process,
+                      args=(output_queue, out_file, file_size, file_compress))
     reduce.start()
 
     # initialize jobs queue
@@ -466,8 +459,6 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # wait for it to finish
     reduce.join()
 
-    if output != sys.stdout:
-        output.close()
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
     logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
@@ -496,35 +487,68 @@ def extract_process(jobs_queue, output_queue, html_safe):
             break
 
 
-def reduce_process(output_queue, output):
+def reduce_process(output_queue, out_file, file_size, file_compress):
     """
     Pull finished article text, write series of files (or stdout)
     :param output_queue: text to be output.
-    :param output: file object where to print.
+    :param out_file: path to write output to, or '-' for stdout.
+    :param file_size: max size per output file (see OutputSplitter).
+    :param file_compress: whether to bzip2-compress output files.
+
+    Builds its own output/OutputSplitter here, rather than receiving
+    an already-open one constructed by the parent process: an open
+    file object (or BZ2File) generally can't be pickled, which this
+    codebase previously worked around by forcing the "fork" process-
+    start method elsewhere in this file -- a method that isn't even
+    available on Windows at all. Accepting only plain, trivially
+    picklable values here instead removes the need for that
+    workaround, and this process opening (and, importantly, properly
+    closing) the file itself is also what fixes a separate real bug:
+    see the comment on close() below.
     """
+    if out_file == '-':
+        output = sys.stdout
+        if file_compress:
+            logging.warning("writing to stdout, so no output compression "
+                             "(use an external tool)")
+    else:
+        nextFile = NextFile(out_file)
+        output = OutputSplitter(nextFile, file_size, file_compress)
 
     interval_start = default_timer()
     period = 100000
     # FIXME: use a heap
     ordering_buffer = {}  # collected pages
     next_ordinal = 0  # sequence number of pages
-    while True:
-        if next_ordinal in ordering_buffer:
-            output.write(ordering_buffer.pop(next_ordinal))
-            next_ordinal += 1
-            # progress report
-            if next_ordinal % period == 0:
-                interval_rate = period / (default_timer() - interval_start)
-                logging.info("Extracted %d articles (%.1f art/s)",
-                             next_ordinal, interval_rate)
-                interval_start = default_timer()
-        else:
-            # mapper puts None to signal finish
-            pair = output_queue.get()
-            if not pair:
-                break
-            ordinal, text = pair
-            ordering_buffer[ordinal] = text
+    try:
+        while True:
+            if next_ordinal in ordering_buffer:
+                output.write(ordering_buffer.pop(next_ordinal))
+                next_ordinal += 1
+                # progress report
+                if next_ordinal % period == 0:
+                    interval_rate = period / (default_timer() - interval_start)
+                    logging.info("Extracted %d articles (%.1f art/s)",
+                                 next_ordinal, interval_rate)
+                    interval_start = default_timer()
+            else:
+                # mapper puts None to signal finish
+                pair = output_queue.get()
+                if not pair:
+                    break
+                ordinal, text = pair
+                ordering_buffer[ordinal] = text
+    finally:
+        # This process's own writes are buffered in its own memory.
+        # Since this process now opens its own output itself (rather
+        # than receiving an already-open copy from the parent), there
+        # is no other copy anywhere that could flush this one's
+        # buffered data -- without this, its last buffered write(s)
+        # are simply lost when it exits, with no error at all.
+        # Confirmed directly: this reliably dropped exactly the last
+        # page from every dump tested, regardless of size.
+        if output != sys.stdout:
+            output.close()
 
 
 # ----------------------------------------------------------------------
