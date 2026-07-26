@@ -354,25 +354,57 @@ def safe_qsize(queue):
         return None
 
 
+def get_memory_usage_mb(pid):
+    """
+    Reads the current resident set size (RSS -- actual physical memory
+    currently in use, not virtual/reserved) for the given PID directly
+    from /proc, in megabytes. Returns None if the process has already
+    exited, if permission is denied, or on a non-Linux platform where
+    /proc doesn't exist -- callers should treat None as "unknown", not
+    as zero.
+    """
+    try:
+        with open('/proc/%d/status' % pid) as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    # format: "VmRSS:\t    1632 kB"
+                    kb = int(line.split()[1])
+                    return kb / 1024
+    except (FileNotFoundError, PermissionError, ValueError, ProcessLookupError):
+        return None
+    return None
+
+
 def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interval=60):
     """
-    Periodically logs queue depths and process liveness, so a stalled
-    run can be diagnosed even during long stretches with no per-page
-    activity to log at all -- e.g. the mapper itself blocked on
-    jobs_queue.put() because no worker is consuming, or reduce_process
-    having been killed outright (an OOM kill, for instance, leaves no
-    trace in the per-page logging at all: see the REDUCER_EXIT
-    docstring in reduce_process() for why). is_alive() queries actual
-    OS process state directly, rather than inferring it from log
-    silence.
+    Periodically logs queue depths, process liveness, and memory usage,
+    so a stalled run can be diagnosed even during long stretches with
+    no per-page activity to log at all -- e.g. the mapper itself
+    blocked on jobs_queue.put() because no worker is consuming, or
+    reduce_process having been killed outright (an OOM kill, for
+    instance, leaves no trace in the per-page logging at all: see the
+    REDUCER_EXIT docstring in reduce_process() for why -- SIGKILL
+    allows no Python-level cleanup, not even that). is_alive() queries
+    actual OS process state directly, rather than inferring it from
+    log silence. reduce_process's own memory usage is tracked
+    specifically because that's where ordering_buffer lives -- an
+    unbounded, growing figure there right up until it disappears
+    (rather than a REDUCER_EXIT line) is direct, rather than inferred,
+    evidence of an OOM kill.
     :param interval: seconds between checks.
     """
     while not stop_event.wait(interval):
         alive_workers = sum(1 for w in workers if w.is_alive())
+        reduce_mem = get_memory_usage_mb(reduce_proc.pid) if reduce_proc.pid else None
+        worker_mems = [m for m in (get_memory_usage_mb(w.pid) for w in workers if w.pid)
+                       if m is not None]
         logging.info(
-            "WATCHDOG jobs_queue=%s output_queue=%s reduce_alive=%s workers_alive=%d/%d",
-            safe_qsize(jobs_queue), safe_qsize(output_queue),
-            reduce_proc.is_alive(), alive_workers, len(workers))
+            "WATCHDOG jobs_queue=%s output_queue=%s reduce_alive=%s "
+            "reduce_mem_mb=%s workers_alive=%d/%d workers_total_mem_mb=%s",
+            safe_qsize(jobs_queue), safe_qsize(output_queue), reduce_proc.is_alive(),
+            "%.1f" % reduce_mem if reduce_mem is not None else "unknown",
+            alive_workers, len(workers),
+            "%.1f" % sum(worker_mems) if worker_mems else "unknown")
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
