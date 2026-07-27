@@ -27,6 +27,14 @@ from html.entities import name2codepoint
 import logging
 import time
 
+# Named separately from WikiExtractor.py's own 'wikiextractor.mapreduce'
+# logger: this one covers extraction mechanics specifically -- template
+# substitution, invocation, link processing -- gated by --debug, while
+# the mapreduce one covers pipeline coordination under
+# --debug_map_reduce. Named and configured independently so either can
+# be enabled without the other.
+logger = logging.getLogger('wikiextractor.extract')
+
 # ----------------------------------------------------------------------
 
 # match tail after wikilink
@@ -949,7 +957,7 @@ class Template(list):
         # {{ppp|q=r|p=q}} gives r, but using Template:tvvv containing
         # "{{{{{{{{{p}}}}}}}}}", {{tvvv|p=q|q=r|r=s}} gives s.
 
-        logging.debug('subst tpl (%d, %d) %s', len(extractor.frame), depth, self)
+        logger.debug('subst tpl (%d, %d) %s', len(extractor.frame), depth, self)
 
         if depth > extractor.maxParameterRecursionLevels:
             extractor.recursion_exceeded_3_errs += 1
@@ -983,7 +991,7 @@ class TemplateArg():
 
         # any parts in a tplarg after the first (the parameter default) are
         # ignored, and an equals sign in the first part is treated as plain text.
-        #logging.debug('TemplateArg %s', parameter)
+        #logger.debug('TemplateArg %s', parameter)
 
         parts = splitParts(parameter)
         self.name = Template.parse(parts[0])
@@ -1015,7 +1023,7 @@ class TemplateArg():
         elif self.default:            # use the default value
             defaultValue = self.default.subst(params, extractor, depth+1)
             res =  extractor.expandTemplates(defaultValue)
-        #logging.debug('subst arg %d %s -> %s' % (depth, paramName, res))
+        #logger.debug('subst arg %d %s -> %s' % (depth, paramName, res))
         return res
 
 
@@ -1099,7 +1107,7 @@ class Extractor():
         :param out: a memory file.
         :param html_safe: whether to escape HTML entities.
         """
-        logging.debug("%s\t%s", self.id, self.title)
+        logger.debug("%s\t%s", self.id, self.title)
         text = ''.join(self.page)
         text = self.clean_text(text, html_safe=html_safe)
 
@@ -1135,7 +1143,7 @@ class Extractor():
                 self.recursion_exceeded_3_errs,
                 self.template_loop_errs)
         if any(errs):
-            logging.warn("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d) loop(%d)",
+            logger.warning("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d) loop(%d)",
                          self.title, self.id, *errs)
 
     # ----------------------------------------------------------------------
@@ -1174,7 +1182,7 @@ class Extractor():
             self.recursion_exceeded_1_errs += 1
             return res
 
-        # logging.debug('<expandTemplates ' + str(len(self.frame)))
+        # logger.debug('<expandTemplates ' + str(len(self.frame)))
 
         cur = 0
         # look for matching {{...}}
@@ -1183,7 +1191,7 @@ class Extractor():
             cur = e
         # leftover
         res += wikitext[cur:]
-        # logging.debug('   expandTemplates> %d %s', len(self.frame), res)
+        # logger.debug('   expandTemplates> %d %s', len(self.frame), res)
         return res
 
     def templateParams(self, parameters):
@@ -1195,7 +1203,7 @@ class Extractor():
 
         if not parameters:
             return templateParams
-        logging.debug('<templateParams: %s', '|'.join(parameters))
+        logger.debug('<templateParams: %s', '|'.join(parameters))
 
         # Parameters can be either named or unnamed. In the latter case, their
         # name is defined by their ordinal position (1, 2, 3, ...).
@@ -1255,7 +1263,7 @@ class Extractor():
                 if ']]' not in param:  # if the value does not contain a link, trim whitespace
                     param = param.strip()
                 templateParams[str(unnamedParameterCounter)] = param
-        logging.debug('   templateParams> %s', '|'.join(templateParams.values()))
+        logger.debug('   templateParams> %s', '|'.join(templateParams.values()))
         return templateParams
 
     def expandTemplate(self, body):
@@ -1305,14 +1313,14 @@ class Extractor():
 
         if len(self.frame) >= self.maxTemplateRecursionLevels:
             self.recursion_exceeded_2_errs += 1
-            # logging.debug('   INVOCATION> %d %s', len(self.frame), body)
+            # logger.debug('   INVOCATION> %d %s', len(self.frame), body)
             return ''
 
-        logging.debug('INVOCATION %d %s', len(self.frame), body)
+        logger.debug('INVOCATION %d %s', len(self.frame), body)
 
         parts = splitParts(body)
         # title is the portion before the first |
-        logging.debug('TITLE %s', parts[0].strip())
+        logger.debug('TITLE %s', parts[0].strip())
         title = self.expandTemplates(parts[0].strip())
 
         # SUBST
@@ -1360,7 +1368,7 @@ class Extractor():
             # The page being included could not be identified
             return ''
 
-        # logging.debug('TEMPLATE %s: %s', title, template)
+        # logger.debug('TEMPLATE %s: %s', title, template)
 
         # tplarg          = "{{{" parts "}}}"
         # parts           = [ title *( "|" part ) ]
@@ -1421,7 +1429,7 @@ class Extractor():
             loopKey = (self.id, title)
             if loopKey not in self.warned_loop_keys:
                 self.warned_loop_keys.add(loopKey)
-                logging.warning("Template loop detected: %s (article %s, id %s) -- "
+                logger.warning("Template loop detected: %s (article %s, id %s) -- "
                                  "leaving unexpanded (further repeats in this "
                                  "article are counted but not logged)",
                                  title, self.title, self.id)
@@ -1433,10 +1441,10 @@ class Extractor():
         # 21637542 in enwiki.
         self.frame.append((title, params))
         instantiated = template.subst(params, self)
-        # logging.debug('instantiated %d %s', len(self.frame), instantiated)
+        # logger.debug('instantiated %d %s', len(self.frame), instantiated)
         value = self.expandTemplates(instantiated)
         self.frame.pop()
-        # logging.debug('   INVOCATION> %s %d %s', title, len(self.frame), value)
+        # logger.debug('   INVOCATION> %s %d %s', title, len(self.frame), value)
         return value
 
 
@@ -1512,7 +1520,7 @@ def splitParts(paramsList):
         else:
             parameters = par
 
-    # logging.debug('splitParts %s %s\nparams: %s', sep, paramsList, str(parameters))
+    # logger.debug('splitParts %s %s\nparams: %s', sep, paramsList, str(parameters))
     return parameters
 
 
@@ -1872,7 +1880,7 @@ def sharp_invoke(module, function, frame):
             # template invocation
             templateTitle = fullyQualifiedTemplateTitle(function)
             if not templateTitle:
-                logging.warn("Template with empty title")
+                logger.warning("Template with empty title")
             pair = next((x for x in frame if x[0] == templateTitle), None)
             if pair:
                 params = pair[1]
@@ -1944,11 +1952,11 @@ def callParserFunction(functionName, args, frame):
         if functionName == '#invoke':
             # special handling of frame
             ret = sharp_invoke(args[0].strip(), args[1].strip(), frame)
-            # logging.debug('parserFunction> %s %s', args[1], ret)
+            # logger.debug('parserFunction> %s %s', args[1], ret)
             return ret
         if functionName in parserFunctions:
             ret = parserFunctions[functionName](*args)
-            # logging.debug('parserFunction> %s(%s) %s', functionName, args, ret)
+            # logger.debug('parserFunction> %s(%s) %s', functionName, args, ret)
             return ret
     except:
         return ""  # FIXME: fix errors
@@ -2016,5 +2024,5 @@ def define_template(title, page):
 
     if text:
         if title in templates and templates[title] != text:
-            logging.warn('Redefining: %s', title)
+            logger.warning('Redefining: %s', title)
         templates[title] = text

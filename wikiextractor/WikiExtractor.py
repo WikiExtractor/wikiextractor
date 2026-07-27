@@ -76,6 +76,43 @@ from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
 # Program version
 __version__ = '3.0.8'
 
+# Separate from extract.py's own 'wikiextractor.extract' logger (which
+# covers the extraction mechanics themselves -- template substitution,
+# link processing, etc., under --debug): this one covers map/reduce
+# coordination -- per-page timing, queue dispatch, reducer progress,
+# and worker/reducer liveness -- under --debug_map_reduce. Named and
+# configured independently so either can be enabled without the other.
+mapreduce_logger = logging.getLogger('wikiextractor.mapreduce')
+
+
+def configure_mapreduce_logging(enabled):
+    """
+    Sets mapreduce_logger's level and gives it its own handler/format
+    (including a timestamp, %(asctime)s -- the root logger's own
+    format has none) with propagate=False, so its messages go out
+    through this handler only, not duplicated via the root logger's.
+
+    Must be called at the start of extract_process() and
+    reduce_process() specifically, not just once in the parent: both
+    are real multiprocessing.Process instances, and under the "spawn"
+    start method (unlike "fork"), a child re-imports the module fresh
+    and does NOT inherit a level set on the parent's already-running
+    logger after import -- confirmed directly (a spawned child's
+    logger showed effective level WARNING, not DEBUG, despite the
+    parent having set DEBUG on the same named logger beforehand).
+    Calling this at the top of each of those functions -- rather than
+    passing a boolean into every individual logging call -- is what
+    lets call sites just be unconditional mapreduce_logger.debug(...)
+    calls throughout the rest of this file.
+    """
+    mapreduce_logger.setLevel(logging.DEBUG if enabled else logging.WARNING)
+    if not mapreduce_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            '%(levelname)s: %(asctime)s %(message)s'))
+        mapreduce_logger.addHandler(handler)
+    mapreduce_logger.propagate = False
+
 ##
 # Defined in <siteinfo>
 # We include as default Template, when loading external template file.
@@ -398,7 +435,7 @@ def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interva
         reduce_mem = get_memory_usage_mb(reduce_proc.pid) if reduce_proc.pid else None
         worker_mems = [m for m in (get_memory_usage_mb(w.pid) for w in workers if w.pid)
                        if m is not None]
-        logging.info(
+        mapreduce_logger.debug(
             "WATCHDOG jobs_queue=%s output_queue=%s reduce_alive=%s "
             "reduce_mem_mb=%s workers_alive=%d/%d workers_total_mem_mb=%s",
             safe_qsize(jobs_queue), safe_qsize(output_queue), reduce_proc.is_alive(),
@@ -408,7 +445,7 @@ def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interva
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe, expand_templates=True, page_timing=False):
+                 process_count, html_safe, expand_templates=True, debug_map_reduce=False):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -418,7 +455,9 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param process_count: number of extraction processes to spawn.
     :html_safe: whether to convert entities in text to HTML.
     :param expand_templates: whether to expand templates.
-    :param page_timing: whether to log each page's wall-clock start/finish/elapsed time.
+    :param debug_map_reduce: enables mapreduce_logger's DEBUG-level
+        messages (see configure_mapreduce_logging()) -- per-page
+        timing, queue dispatch, reducer progress, watchdog status.
     """
     global knownNamespaces
     global templateNamespace
@@ -487,7 +526,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
     # Reduce job that sorts and prints output
     reduce = Process(target=reduce_process,
-                      args=(output_queue, out_file, file_size, file_compress, page_timing))
+                      args=(output_queue, out_file, file_size, file_compress, debug_map_reduce))
     reduce.start()
 
     # initialize jobs queue
@@ -498,14 +537,14 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, html_safe, page_timing))
+                            args=(jobs_queue, output_queue, html_safe, debug_map_reduce))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
 
     watchdog_stop = threading.Event()
     watchdog_thread = None
-    if page_timing:
+    if mapreduce_logger.isEnabledFor(logging.DEBUG):
         watchdog_thread = threading.Thread(
             target=watchdog, args=(jobs_queue, output_queue, reduce, workers, watchdog_stop),
             daemon=True)
@@ -520,10 +559,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     for id, revid, title, page in collect_pages(input):
         job = (id, revid, urlbase, title, page, ordinal)
         jobs_queue.put(job)  # goes to any available extract_process
-        if page_timing:
-            logging.info("JOB_QUEUED ordinal=%d id=%s title=%r time=%s",
-                         ordinal, id, title,
-                         time.strftime('%Y-%m-%d %H:%M:%S'))
+        mapreduce_logger.debug("JOB_QUEUED ordinal=%d id=%s title=%r", ordinal, id, title)
         ordinal += 1
 
     input.close()
@@ -554,42 +590,38 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, html_safe, page_timing=False):
+def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
     :html_safe: whether to convert entities in text to HTML.
-    :param page_timing: whether to log each page's wall-clock start/finish/elapsed
-        time. Two lines per page (PAGE_START when a worker begins it, PAGE_TIMING
-        when it finishes), logged at INFO level (no --debug needed) -- useful for
-        isolating a specific slow/stuck page when extraction seems to hang: sort
-        PAGE_TIMING lines by elapsed time to spot an outlier directly, or, for a
-        page that never finishes at all (no amount of waiting produces a matching
-        PAGE_TIMING line for it), find that worker's PID's last PAGE_START line --
-        that's exactly the page it's stuck on, with no need to infer it from
-        surrounding pages or wait to see whether it was "just slow".
+    :param debug_map_reduce: configures this process's own copy of
+        mapreduce_logger (see configure_mapreduce_logging()) -- when
+        enabled, logs each page's wall-clock start/elapsed time (two
+        lines per page: PAGE_START when a worker begins it, PAGE_TIMING
+        when it finishes) -- useful for isolating a specific slow/stuck
+        page when extraction seems to hang: sort PAGE_TIMING lines by
+        elapsed time to spot an outlier directly, or, for a page that
+        never finishes at all (no amount of waiting produces a matching
+        PAGE_TIMING line for it), find that worker's PID's last
+        PAGE_START line -- that's exactly the page it's stuck on, with
+        no need to infer it from surrounding pages or wait to see
+        whether it was "just slow".
     """
+    configure_mapreduce_logging(debug_map_reduce)
     while True:
         job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
         if job:
-            if page_timing:
-                page_id, _, _, title, _, ordinal = job
-                start = time.time()
-                logging.info(
-                    "PAGE_START pid=%d ordinal=%d id=%s title=%r start=%s",
-                    os.getpid(), ordinal, page_id, title,
-                    time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start)))
+            page_id, _, _, title, _, ordinal = job
+            start = time.time()
+            mapreduce_logger.debug("PAGE_START pid=%d ordinal=%d id=%s title=%r",
+                                   os.getpid(), ordinal, page_id, title)
             out = StringIO()  # memory buffer
             Extractor(*job[:-1]).extract(out, html_safe)  # (id, urlbase, title, page)
-            if page_timing:
-                finish = time.time()
-                logging.info(
-                    "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r "
-                    "start=%s finish=%s elapsed=%.2fs",
-                    os.getpid(), ordinal, page_id, title,
-                    time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start)),
-                    time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finish)),
-                    finish - start)
+            finish = time.time()
+            mapreduce_logger.debug(
+                "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r elapsed=%.2fs",
+                os.getpid(), ordinal, page_id, title, finish - start)
             text = out.getvalue()
             output_queue.put((job[-1], text))  # (ordinal, extracted_text)
             out.close()
@@ -597,16 +629,18 @@ def extract_process(jobs_queue, output_queue, html_safe, page_timing=False):
             break
 
 
-def reduce_process(output_queue, out_file, file_size, file_compress, page_timing=False):
+def reduce_process(output_queue, out_file, file_size, file_compress, debug_map_reduce=False):
     """
     Pull finished article text, write series of files (or stdout)
     :param output_queue: text to be output.
     :param out_file: path to write output to, or '-' for stdout.
     :param file_size: max size per output file (see OutputSplitter).
     :param file_compress: whether to bzip2-compress output files.
-    :param page_timing: whether to log REDUCER_PROGRESS for every page
-        written (ordinal, current buffer depth, timestamp) -- shares
-        the same flag as the workers' PAGE_START/PAGE_TIMING logging.
+    :param debug_map_reduce: configures this process's own copy of
+        mapreduce_logger (see configure_mapreduce_logging()) -- when
+        enabled, logs REDUCER_PROGRESS for every page written (ordinal,
+        current buffer depth) -- shares the same logger as the workers'
+        PAGE_START/PAGE_TIMING logging.
 
     Builds its own output/OutputSplitter here, rather than receiving
     an already-open one constructed by the parent process: an open
@@ -622,6 +656,7 @@ def reduce_process(output_queue, out_file, file_size, file_compress, page_timing
     On exit, always logs the status of the exit (except in the case
     of a SIGKILL)
     """
+    configure_mapreduce_logging(debug_map_reduce)
     if out_file == '-':
         output = sys.stdout
         if file_compress:
@@ -641,11 +676,8 @@ def reduce_process(output_queue, out_file, file_size, file_compress, page_timing
             if next_ordinal in ordering_buffer:
                 output.write(ordering_buffer.pop(next_ordinal))
                 next_ordinal += 1
-                if page_timing:
-                    logging.info(
-                        "REDUCER_PROGRESS ordinal=%d buffered=%d time=%s",
-                        next_ordinal - 1, len(ordering_buffer),
-                        time.strftime('%Y-%m-%d %H:%M:%S'))
+                mapreduce_logger.debug("REDUCER_PROGRESS ordinal=%d buffered=%d",
+                                       next_ordinal - 1, len(ordering_buffer))
                 # progress report
                 if next_ordinal % period == 0:
                     interval_rate = period / (default_timer() - interval_start)
@@ -660,7 +692,8 @@ def reduce_process(output_queue, out_file, file_size, file_compress, page_timing
                 ordinal, text = pair
                 ordering_buffer[ordinal] = text
     finally:
-        # Always logged (not gated by page_timing): whether this
+        # Always logged (on the root logger, not gated by
+        # --debug_map_reduce at all): whether this
         # process is exiting cleanly (every buffered page successfully
         # written, nothing left over) or with pages still stuck in
         # ordering_buffer -- which would mean the sentinel arrived
@@ -744,17 +777,19 @@ def main():
                         help="suppress reporting progress info")
     groupS.add_argument("--debug", action="store_true",
                         help="print debug info")
-    groupS.add_argument("--page_timing", action="store_true",
-                        help="log wall-clock start (PAGE_START) and finish/elapsed "
-                             "(PAGE_TIMING) time for every extracted page, at the "
-                             "default INFO log level -- does not require --debug, "
-                             "and is far less noisy. A page that never finishes "
-                             "still leaves its PAGE_START line behind, so a stuck "
-                             "worker's last page is identifiable even without "
-                             "waiting for it to complete. Useful for finding a "
-                             "specific slow or stuck page when extraction seems to "
-                             "hang: sort PAGE_TIMING lines by elapsed time to spot "
-                             "an outlier, or find a PID's dangling PAGE_START.")
+    groupS.add_argument("--debug_map_reduce", action="store_true",
+                        help="enable map/reduce coordination diagnostics: PAGE_START "
+                             "and PAGE_TIMING (elapsed) for every extracted page, "
+                             "JOB_QUEUED for every dispatched page, REDUCER_PROGRESS "
+                             "for every page written, and a periodic WATCHDOG status "
+                             "line (queue depths, memory, process liveness). "
+                             "Independent of --debug (which covers extraction "
+                             "mechanics in extract.py instead), and far less noisy. "
+                             "A page that never finishes still leaves its PAGE_START "
+                             "line behind, so a stuck worker's last page is "
+                             "identifiable even without waiting for it to complete: "
+                             "sort PAGE_TIMING lines by elapsed time to spot an "
+                             "outlier, or find a PID's dangling PAGE_START.")
     groupS.add_argument("-a", "--article", action="store_true",
                         help="analyze a file containing a single article (debug option)")
     groupS.add_argument("-v", "--version", action="version",
@@ -829,9 +864,10 @@ def main():
             logging.error('Could not create: %s', output_path)
             return
 
+    configure_mapreduce_logging(args.debug_map_reduce)
     process_dump(input_file, args.templates, output_path, file_size,
                  args.compress, args.processes, args.html_safe, not args.no_templates,
-                 args.page_timing)
+                 args.debug_map_reduce)
 
 if __name__ == '__main__':
     main()
