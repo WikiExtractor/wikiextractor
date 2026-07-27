@@ -66,7 +66,7 @@ import sys
 import threading
 import time
 from io import StringIO
-from multiprocessing import Queue, get_context, cpu_count
+from multiprocessing import Queue, get_context, cpu_count, Value, Condition
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
@@ -529,9 +529,35 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # output queue
     output_queue = Queue(maxsize=maxsize)
 
+    # Shared counter reduce_process updates every time it successfully
+    # writes an ordinal out, so the mapper below can tell how far
+    # ahead of the actually-written output it's gotten -- without this,
+    # nothing stops the mapper from queueing (and workers from
+    # completing) unboundedly many pages while reduce_process is stuck
+    # waiting on one specific ordinal, e.g. a genuinely stuck or
+    # extremely slow page: every other worker just keeps racing ahead,
+    # and every one of their completed results piles up in
+    # reduce_process's own ordering_buffer, which has no size limit at
+    # all. This bounds how far ahead the pipeline is allowed to get,
+    # at the mapper (job-dispatch) side specifically -- NOT inside
+    # reduce_process itself, since reduce_process must keep draining
+    # output_queue unconditionally to have any chance of ever finding
+    # the specific ordinal it's waiting for (a plain multiprocessing
+    # Queue only supports FIFO reads, with no way to selectively wait
+    # for one specific item while ignoring others ahead of it in the
+    # queue -- pausing reduce_process's own consumption was tried and
+    # reverted after it produced a genuine deadlock in testing).
+    next_ordinal_shared = Value('l', 0)
+
+    # Notified by reduce_process every time next_ordinal_shared
+    # advances, so the mapper's throttle below can genuinely wake up
+    # on that specific event, rather than polling the value on some
+    # fixed interval regardless of whether anything happened.
+    progress_condition = Condition()
+
     # Reduce job that sorts and prints output
     reduce = Process(target=reduce_process,
-                      args=(output_queue, out_file, file_size, file_compress, debug_map_reduce))
+                      args=(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition, debug_map_reduce))
     reduce.start()
 
     # initialize jobs queue
@@ -561,7 +587,16 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # than concatenation
 
     ordinal = 0  # page count
+    # How far ahead of the last actually-written ordinal the mapper is
+    # willing to get before pausing -- matches the same maxsize
+    # convention already used for the queues themselves, so this stays
+    # proportional to process_count.
     for id, revid, title, page in collect_pages(input):
+        while ordinal - next_ordinal_shared.value > maxsize:
+            # progress_condition is notified by reduce_process every
+            # time next_ordinal_shared actually advances (see there),
+            with progress_condition:
+                progress_condition.wait(timeout=1.0)
         job = (id, revid, urlbase, title, page, ordinal)
         jobs_queue.put(job)  # goes to any available extract_process
         mapreduce_logger.debug("JOB_QUEUED ordinal=%d id=%s title=%r", ordinal, id, title)
@@ -634,13 +669,20 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False)
             break
 
 
-def reduce_process(output_queue, out_file, file_size, file_compress, debug_map_reduce=False):
+def reduce_process(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition, debug_map_reduce=False):
     """
     Pull finished article text, write series of files (or stdout)
     :param output_queue: text to be output.
     :param out_file: path to write output to, or '-' for stdout.
     :param file_size: max size per output file (see OutputSplitter).
     :param file_compress: whether to bzip2-compress output files.
+    :param next_ordinal_shared: multiprocessing.Value updated
+        every time next_ordinal advances, so another process (the
+        job-dispatching mapper) can throttle itself based on how far
+        ahead it's gotten
+    :param progress_condition: multiprocessing.Condition notified every
+        time next_ordinal_shared advances, so the mapper's throttle can
+        wake up on that specific event instead of polling the value.
     :param debug_map_reduce: configures this process's own copy of
         mapreduce_logger (see configure_mapreduce_logging()) -- when
         enabled, logs REDUCER_PROGRESS for every page written (ordinal,
@@ -681,6 +723,9 @@ def reduce_process(output_queue, out_file, file_size, file_compress, debug_map_r
             if next_ordinal in ordering_buffer:
                 output.write(ordering_buffer.pop(next_ordinal))
                 next_ordinal += 1
+                with progress_condition:
+                    next_ordinal_shared.value = next_ordinal
+                    progress_condition.notify_all()
                 mapreduce_logger.debug("REDUCER_PROGRESS ordinal=%d buffered=%d",
                                        next_ordinal - 1, len(ordering_buffer))
                 # progress report
