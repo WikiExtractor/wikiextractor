@@ -806,7 +806,7 @@ ignored_tag_patterns = []
 
 def ignoreTag(tag):
     left = re.compile(r'<%s\b.*?>' % tag, re.IGNORECASE | re.DOTALL)  # both <ref> and <reference>
-    right = re.compile(r'</\s*%s>' % tag, re.IGNORECASE)
+    right = re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE)  # space allowed, such as </span >
     ignored_tag_patterns.append((left, right))
 
 
@@ -2026,3 +2026,4 @@ def define_template(title, page):
         if title in templates and templates[title] != text:
             logger.warning('Redefining: %s', title)
         templates[title] = text
+

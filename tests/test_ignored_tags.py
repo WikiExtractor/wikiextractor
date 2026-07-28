@@ -120,22 +120,28 @@ class CaseInsensitivityTests(IgnoredTagsTestCase):
 
 
 class WhitespaceHandlingTests(IgnoredTagsTestCase):
-    """Confirmed asymmetric, not a symmetric "whitespace is always
-    fine" or "whitespace never matches" rule -- verified directly
-    against the actual patterns before writing these. Uses span
-    rather than div specifically to avoid a separate, real interaction
-    (div is registered in BOTH ignoredTags and discardElements -- see
-    DivDiscardElementsOverlapTests below) that would otherwise
-    confound what these tests are isolating.
+    """Matches real HTML tokenizer behavior (confirmed directly
+    against Python's html.parser rather than assumed): a tag name
+    must immediately follow '<' with no whitespace in front of it,
+    but whitespace is tolerated on either side of the tag name within
+    a closing tag (both after '</' and before the final '>'). Uses
+    span rather than div specifically to avoid a separate, real
+    interaction (div is registered in BOTH ignoredTags and
+    discardElements -- see DivDiscardElementsOverlapTests below) that
+    would otherwise confound what these tests are isolating.
     """
 
     def test_space_before_tag_name_in_opening_tag_breaks_match(self):
-        # <%s\b.*?> requires the tag name immediately after '<' --
-        # confirmed this survives completely unmatched (both halves),
-        # HTML-escaped, rather than being stripped.
+        # <%s\b.*?> requires the tag name immediately after '<' -- the
+        # OPENING half here still never matches, surviving HTML-escaped.
+        # But the closing half, "</ span >", now matches independently
+        # (whitespace tolerated on both sides of the name there) and
+        # gets stripped on its own -- dropSpans() removes spans
+        # independently, with no requirement that a stripped closing
+        # tag be paired with a stripped opening one.
         text = "word< span >middle</ span >word"
         result = self.get_result(text)
-        self.assertEqual(result, ["word&lt; span &gt;middle&lt;/ span &gt;word"])
+        self.assertEqual(result, ["word&lt; span &gt;middleword"])
 
     def test_space_between_close_slash_and_tag_name_is_tolerated(self):
         # </\s*%s> tolerates whitespace here specifically.
@@ -143,13 +149,15 @@ class WhitespaceHandlingTests(IgnoredTagsTestCase):
         result = self.get_result(text)
         self.assertEqual(result, ["wordmiddleword"])
 
-    def test_space_after_tag_name_before_close_angle_bracket_breaks_match(self):
-        # No \s* before the final '>' in the closing pattern -- this
-        # closing tag does NOT match, and survives HTML-escaped, even
-        # though the opening tag on the same text matched fine.
+    def test_space_after_tag_name_before_close_angle_bracket_is_tolerated(self):
+        # Confirmed directly against a real HTML tokenizer (Python's
+        # html.parser) that this is how actual HTML parsing treats a
+        # closing tag: whitespace before the final '>' is tolerated,
+        # the same way it would be in an opening tag. The regex now
+        # matches that -- this used to survive HTML-escaped instead.
         text = "word<span>middle</span >word"
         result = self.get_result(text)
-        self.assertEqual(result, ["wordmiddle&lt;/span &gt;word"])
+        self.assertEqual(result, ["wordmiddleword"])
 
 
 class DivDiscardElementsOverlapTests(IgnoredTagsTestCase):
