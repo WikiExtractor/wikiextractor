@@ -726,7 +726,7 @@ selfClosingTags = ('nobr', 'ref', 'references', 'nowiki', 'templatestyles')
 ignoredTags = (
     'abbr', 'b', 'big', 'blockquote', 'center', 'cite', 'div', 'em',
     'font', 'h1', 'h2', 'h3', 'h4', 'hiero', 'i', 'kbd', 'nowiki',
-    'p', 'plaintext', 's', 'span', 'strike', 'strong',
+    'p', 'plaintext', 'poem', 's', 'span', 'strike', 'strong',
     'sub', 'sup', 'tt', 'u', 'var'
 )
 
