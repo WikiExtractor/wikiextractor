@@ -162,6 +162,13 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     for pattern in lineBreak_tag_patterns:
         text = substituteLineBreakTag(pattern, text)
 
+    # Same must-run-before-span-collection reasoning as the br/hr
+    # substitution just above applies here too: this also mutates
+    # text's length, so it has to happen before anything else records
+    # a position into this same text.
+    for pattern in block_separator_tag_patterns:
+        text = substituteLineBreakTag(pattern, text, separator='\n')
+
     spans = []
     # Drop HTML comments
     for m in comment.finditer(text):
@@ -986,12 +993,37 @@ magicWordsRE = re.compile('|'.join(MagicWords.switches))
 lineBreakTags = ('br', 'hr')
 selfClosingTags = ('nobr', 'ref', 'references', 'nowiki', 'templatestyles')
 
+# Block-level by default HTML semantics (a real browser renders an
+# implicit line break around each of these), unlike the rest of
+# ignoredTags below, which are genuinely inline (span, b, i, etc. --
+# no implied break at all, confirmed against real HTML tokenizer/CSS
+# default-display behavior). Stripped the same tag-syntax-removed,
+# content-kept way, but via a newline substitution (see
+# substituteLineBreakTag()) rather than plain deletion -- otherwise
+# two adjacent blocks with no whitespace between them in the source
+# fuse into one run-on string, the same class of bug as the earlier
+# br/hr word-merging fix, just for a different set of tags. A newline
+# specifically (not just a space) to match how compact() already
+# treats section/paragraph boundaries elsewhere in this file: wikitext
+# "==heading==" is only recognized when it's on its own line
+# (section.match(line), applied line-by-line via text.split('\n')) --
+# an HTML heading should end up the same way, as its own line, not
+# merged onto the same line as surrounding prose.
+#
+# div is deliberately NOT included here yet, despite also being
+# block-level: it's registered in BOTH ignoredTags and
+# discardElements (see the comment there), and working out how that
+# interacts with a newline-substitution step is a separate piece of
+# work. blockquote isn't included either, out of the same deliberate,
+# narrow scope -- just p, center, and the headers for now.
+blockSeparatorTags = ('p', 'center', 'h1', 'h2', 'h3', 'h4')
+
 # These tags are dropped, keeping their content.
 # handle 'a' separately, depending on keepLinks
 ignoredTags = (
-    'abbr', 'b', 'big', 'blockquote', 'center', 'cite', 'div', 'em',
-    'font', 'h1', 'h2', 'h3', 'h4', 'hiero', 'i', 'kbd', 'nowiki',
-    'p', 'plaintext', 'poem', 's', 'span', 'strike', 'strong',
+    'abbr', 'b', 'big', 'blockquote', 'cite', 'div', 'em',
+    'font', 'hiero', 'i', 'kbd', 'nowiki',
+    'plaintext', 'poem', 's', 'span', 'strike', 'strong',
     'sub', 'sup', 'tt', 'u', 'var'
 )
 
@@ -1119,22 +1151,45 @@ lineBreak_tag_patterns = [
     for tag in lineBreakTags
 ]
 
+# blockSeparatorTags (see the comment there) are substituted with a
+# newline rather than a space, via the same substituteLineBreakTag()
+# mechanism -- each tag contributes its own opening AND closing
+# pattern separately here, since (unlike br/hr, which are single,
+# self-closing tags) these have two distinct halves, each appearing at
+# a different position and needing its own independent substitution.
+# Same shapes as ignoreTag()'s own left/right patterns, for
+# consistency: opening requires the tag name immediately after '<'
+# (matching real HTML tokenizer behavior -- confirmed directly against
+# Python's html.parser -- a bare '< p>' is not treated as a tag at all
+# by real parsers, so this shouldn't either); closing tolerates
+# whitespace on either side of the name.
+block_separator_tag_patterns = [
+    pattern
+    for tag in blockSeparatorTags
+    for pattern in (
+        re.compile(r'<%s\b.*?>' % tag, re.IGNORECASE | re.DOTALL),
+        re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE),
+    )
+]
 
-def substituteLineBreakTag(pattern, text):
+
+def substituteLineBreakTag(pattern, text, separator=' '):
     """
-    Replace each match of a line-break tag pattern (br/hr) with a
-    space, EXCEPT when the match sits at the very start/end of the
-    text or is already adjacent to whitespace (any kind -- space, tab,
-    newline, non-breaking space -- not just newline specifically) on
-    one side -- in that case, omit the space on that side entirely,
-    since there's already something separating it from whatever's
-    there, or nothing at all to separate it from. Checking for any
-    whitespace rather than just newline matters: without it, this
-    function can produce a double space on its own when the source
-    already had one space adjacent to the tag (verified directly), and
-    isn't otherwise self-sufficient -- relying on some other,
-    unrelated part of the pipeline to clean up after it is fragile
-    compared to just not creating the extra space to begin with.
+    Replace each match of a line-break-like tag pattern (br/hr, or a
+    blockSeparatorTags opening/closing half) with `separator`, EXCEPT
+    when the match sits at the very start/end of the text or is
+    already adjacent to whitespace (any kind -- space, tab, newline,
+    non-breaking space -- not just newline specifically) on one side
+    -- in that case, omit the separator on that side entirely, since
+    there's already something separating it from whatever's there, or
+    nothing at all to separate it from. Checking for any whitespace
+    rather than just the specific separator character matters:
+    without it, this function can produce a doubled-up separator on
+    its own when the source already had one adjacent to the tag
+    (verified directly for the space case), and isn't otherwise
+    self-sufficient -- relying on some other, unrelated part of the
+    pipeline to clean up after it is fragile compared to just not
+    creating the extra separator to begin with.
 
     Verified this doesn't over-match invisible RTL-script formatting
     characters that aren't real separators (e.g. zero-width
@@ -1153,7 +1208,7 @@ def substituteLineBreakTag(pattern, text):
         before_is_boundary = (m.start() == 0) or text[m.start() - 1].isspace()
         after_is_boundary = (m.end() == n) or text[m.end()].isspace()
         if not (before_is_boundary or after_is_boundary):
-            result.append(' ')
+            result.append(separator)
         cur = m.end()
     result.append(text[cur:])
     return ''.join(result)
@@ -2296,4 +2351,3 @@ def define_template(title, page):
         if title in templates and templates[title] != text:
             logger.warning('Redefining: %s', title)
         templates[title] = text
-

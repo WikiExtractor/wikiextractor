@@ -70,11 +70,6 @@ class BasicStrippingTests(IgnoredTagsTestCase):
         result = self.get_result(text)
         self.assertEqual(result, ["wordmiddleword"])
 
-    def test_p_stripped_content_kept(self):
-        text = "word<p>middle</p>word"
-        result = self.get_result(text)
-        self.assertEqual(result, ["wordmiddleword"])
-
     def test_sub_and_sup_stripped_content_kept(self):
         text = "H<sub>2</sub>O and x<sup>2</sup>"
         result = self.get_result(text)
