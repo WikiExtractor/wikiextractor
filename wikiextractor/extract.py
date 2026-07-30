@@ -21,6 +21,8 @@
 import re
 import html
 import json
+import ast
+import operator
 from itertools import zip_longest
 from urllib.parse import quote as urlencode
 from html.entities import name2codepoint
@@ -2070,43 +2072,136 @@ def normalizeNamespace(ns):
 # https://github.com/Wikia/app/blob/dev/extensions/ParserFunctions/ParserFunctions_body.php
 
 
-class Infix():
+# #expr's operators, mapped to their Python equivalents -- this is the
+# complete, explicit whitelist; nothing outside it is ever evaluated.
+_SHARP_EXPR_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_SHARP_EXPR_UNARYOPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+    ast.Not: lambda x: 0 if x else 1,
+}
+_SHARP_EXPR_COMPARISONS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+}
 
-    """Infix operators.
-    The calling sequence for the infix is:
-      x |op| y
+
+def _sharp_expr_eval_node(node):
+    """Recursively evaluates one node of a parsed #expr expression,
+    computing the result directly in Python rather than ever calling
+    eval()/exec()/compile() on the (untrusted, wikitext-derived)
+    expression text. Every node type reachable here is on an explicit
+    whitelist; anything else -- a function call, a name lookup, an
+    attribute access, a string, anything at all outside plain
+    numeric/boolean arithmetic -- raises ValueError and is treated as
+    a malformed expression, the same outcome #expr's real syntax
+    would produce for it anyway (it doesn't support any of those
+    either: see https://www.mediawiki.org/wiki/Help:Extension:ParserFunctions,
+    #expr operates on numbers and booleans only, never strings, and
+    has no facility for function calls or name references at all).
+
+    This replaces a previous implementation that called Python's own
+    eval() directly on the (barely pre-processed) expression string.
+    Confirmed directly, not just theoretically: with no explicit
+    globals/locals passed, that eval() call had full access to
+    Python's builtins, including __import__ -- e.g.
+    "{{#expr: __import__('os').system('rm -rf ...') }}" would
+    actually execute a shell command.
+
+    Realistic exposure, precisely: MediaWiki's own #expr wouldn't
+    execute this either (it would just render an inline "Expression
+    error" and save the edit anyway -- the save itself isn't blocked
+    by anything). Automated anti-vandalism tooling on the largest
+    wikis (e.g. ClueBot NG) is trained on what typical vandalism looks
+    like -- profanity, blanking, spam -- and, by its own published
+    numbers, catches only a minority of even that at its current
+    false-positive-conservative setting; a syntactically-plausible,
+    non-obviously-damaging template call is a poor match for what it's
+    trained to flag. Smaller wikis very likely have no such bot
+    running at all, and far fewer active editors, so real exposure
+    time before a human notices could be substantial.
     """
+    if isinstance(node, ast.Expression):
+        return _sharp_expr_eval_node(node.body)
 
-    def __init__(self, function):
-        self.function = function
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return node.value
+        raise ValueError("only numeric constants are permitted in #expr")
 
-    def __ror__(self, other):
-        return Infix(lambda x, self=self, other=other: self.function(other, x))
+    if isinstance(node, ast.BinOp):
+        # "X round Y" gets pre-processed (see sharp_expr() below) into
+        # "X |ROUND| Y", which -- since | left-associates in Python --
+        # parses as (X | ROUND) | Y. Recognized specifically as this
+        # exact shape, rather than treating BitOr as a general-purpose
+        # operator (it isn't one in #expr's own grammar at all).
+        if (isinstance(node.op, ast.BitOr)
+                and isinstance(node.left, ast.BinOp)
+                and isinstance(node.left.op, ast.BitOr)
+                and isinstance(node.left.right, ast.Name)
+                and node.left.right.id == 'ROUND'):
+            value = _sharp_expr_eval_node(node.left.left)
+            digits = _sharp_expr_eval_node(node.right)
+            return round(value, int(digits))
+        op_func = _SHARP_EXPR_BINOPS.get(type(node.op))
+        if op_func is None:
+            raise ValueError(f"operator not permitted in #expr: {type(node.op).__name__}")
+        return op_func(_sharp_expr_eval_node(node.left), _sharp_expr_eval_node(node.right))
 
-    def __or__(self, other):
-        return self.function(other)
+    if isinstance(node, ast.UnaryOp):
+        op_func = _SHARP_EXPR_UNARYOPS.get(type(node.op))
+        if op_func is None:
+            raise ValueError(f"unary operator not permitted in #expr: {type(node.op).__name__}")
+        return op_func(_sharp_expr_eval_node(node.operand))
 
-    def __rlshift__(self, other):
-        return Infix(lambda x, self=self, other=other: self.function(other, x))
+    if isinstance(node, ast.Compare):
+        if len(node.ops) != 1:
+            raise ValueError("chained comparisons not supported in #expr")
+        op_func = _SHARP_EXPR_COMPARISONS.get(type(node.ops[0]))
+        if op_func is None:
+            raise ValueError(f"comparison not permitted in #expr: {type(node.ops[0]).__name__}")
+        result = op_func(_sharp_expr_eval_node(node.left),
+                         _sharp_expr_eval_node(node.comparators[0]))
+        return 1 if result else 0
 
-    def __rshift__(self, other):
-        return self.function(other)
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.And):
+            result = 1
+            for value_node in node.values:
+                result = _sharp_expr_eval_node(value_node)
+                if not result:
+                    return 0
+            return result
+        else:  # ast.Or
+            for value_node in node.values:
+                result = _sharp_expr_eval_node(value_node)
+                if result:
+                    return result
+            return 0
 
-    def __call__(self, value1, value2):
-        return self.function(value1, value2)
-
-
-ROUND = Infix(lambda x, y: round(x, y))
+    raise ValueError(f"disallowed #expr element: {type(node).__name__}")
 
 
 def sharp_expr(expr):
     try:
         expr = re.sub('=', '==', expr)
         expr = re.sub('mod', '%', expr)
-        expr = re.sub('\bdiv\b', '/', expr)
-        expr = re.sub('\bround\b', '|ROUND|', expr)
-        return str(eval(expr))
-    except:
+        expr = re.sub(r'\bdiv\b', '/', expr)
+        expr = re.sub(r'\bround\b', '|ROUND|', expr)
+        tree = ast.parse(expr, mode='eval')
+        return str(_sharp_expr_eval_node(tree))
+    except Exception:
         return '<span class="error"></span>'
 
 
