@@ -1160,11 +1160,10 @@ lineBreak_tag_patterns = [
 # self-closing tags) these have two distinct halves, each appearing at
 # a different position and needing its own independent substitution.
 # Same shapes as ignoreTag()'s own left/right patterns, for
-# consistency: opening requires the tag name immediately after '<'
-# (matching real HTML tokenizer behavior -- confirmed directly against
-# Python's html.parser -- a bare '< p>' is not treated as a tag at all
-# by real parsers, so this shouldn't either); closing tolerates
-# whitespace on either side of the name.
+# consistency: opening requires the tag name immediately after '<',
+# matching real HTML tokenizer behavior (a bare '< p>' is not treated
+# as a tag at all by real parsers, so this shouldn't either); closing
+# tolerates whitespace on either side of the name.
 block_separator_tag_patterns = [
     pattern
     for tag in blockSeparatorTags
@@ -2098,7 +2097,8 @@ _SHARP_EXPR_COMPARISONS = {
 
 
 def _sharp_expr_eval_node(node):
-    """Recursively evaluates one node of a parsed #expr expression,
+    """
+    Recursively evaluates one node of a parsed #expr expression,
     computing the result directly in Python rather than ever calling
     eval()/exec()/compile() on the (untrusted, wikitext-derived)
     expression text. Every node type reachable here is on an explicit
@@ -2111,26 +2111,18 @@ def _sharp_expr_eval_node(node):
     #expr operates on numbers and booleans only, never strings, and
     has no facility for function calls or name references at all).
 
-    This replaces a previous implementation that called Python's own
-    eval() directly on the (barely pre-processed) expression string.
-    Confirmed directly, not just theoretically: with no explicit
-    globals/locals passed, that eval() call had full access to
-    Python's builtins, including __import__ -- e.g.
-    "{{#expr: __import__('os').system('rm -rf ...') }}" would
-    actually execute a shell command.
+    This must never be changed to route the expression text through
+    eval()/exec()/compile() in any form: #expr's input comes from
+    wikitext on openly-editable wikis, and any such path grants full
+    access to Python's builtins (including __import__) unless
+    explicit globals/locals are passed and carefully restricted --
+    easy to get wrong, so the whitelist-only approach here is
+    deliberate, not incidental.
 
-    Realistic exposure, precisely: MediaWiki's own #expr wouldn't
-    execute this either (it would just render an inline "Expression
-    error" and save the edit anyway -- the save itself isn't blocked
-    by anything). Automated anti-vandalism tooling on the largest
-    wikis (e.g. ClueBot NG) is trained on what typical vandalism looks
-    like -- profanity, blanking, spam -- and, by its own published
-    numbers, catches only a minority of even that at its current
-    false-positive-conservative setting; a syntactically-plausible,
-    non-obviously-damaging template call is a poor match for what it's
-    trained to flag. Smaller wikis very likely have no such bot
-    running at all, and far fewer active editors, so real exposure
-    time before a human notices could be substantial.
+    Previously, an eval() call had full access to
+    Python's builtins, including __import__ -- e.g.
+    "{{#expr: __import__('os').system('rm -rf ...') }}"
+    would actually execute a shell command.
     """
     if isinstance(node, ast.Expression):
         return _sharp_expr_eval_node(node.body)
@@ -2294,6 +2286,10 @@ def sharp_switch(primary, *params):
 # Only minimal support for Lua modules invoked via #invoke.
 # FIXME: import real Lua modules (would require a Lua interpreter,
 # which this project doesn't have).
+#
+# Must stay defined in this module, not a caller's -- sharp_invoke()
+# below reads this as a global, and Python resolves that against the
+# function's own defining module, not wherever it's called from.
 modules = {
     'convert': {
         'convert': lambda x, u, *rest: x + ' ' + u,  # no conversion
@@ -2311,21 +2307,12 @@ def sharp_invoke(module, function, frame):
             # right before expanding a template's body, popped right
             # after), so frame[-1] is exactly the template invocation
             # that directly encloses this #invoke call, matching real
-            # Scribunto's frame:getParent() semantics.
-            #
-            # Previously this guessed the calling template's title
-            # from the invoked function's own name instead (e.g.
-            # "convert" -> "Template:Convert"), which only worked when
-            # a template's name happened to match the function it
-            # invokes. That breaks for the ordinary case of an
-            # alias-style template with a different name invoking the
-            # same function -- e.g. {{cvt|...}}, a template literally
-            # named "Cvt", invoking the same "convert" function that
-            # "Template:Convert" also invokes under its own, different
-            # name. Confirmed directly: the old lookup silently failed
-            # for {{cvt|...}} specifically while working for
-            # {{convert|...}}, even though both invoke the identical
-            # function.
+            # Scribunto's frame:getParent() semantics. Don't match by
+            # guessing the calling template's title from the function
+            # name instead -- that only works when they happen to
+            # coincide (e.g. Template:Convert invoking "convert"), and
+            # silently breaks for any differently-named alias template
+            # invoking the same function (e.g. {{cvt|...}}).
             if frame:
                 params = frame[-1][1]
                 # extract positional args
