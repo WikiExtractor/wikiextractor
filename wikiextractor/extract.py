@@ -1761,10 +1761,12 @@ class Extractor():
         # parameter value, e.g. {{OTRS|celebrative|date=April 2015}} in article
         # 21637542 in enwiki.
         self.frame.append((title, params))
-        instantiated = template.subst(params, self)
-        # logger.debug('instantiated %d %s', len(self.frame), instantiated)
-        value = self.expandTemplates(instantiated)
-        self.frame.pop()
+        try:
+            instantiated = template.subst(params, self)
+            # logger.debug('instantiated %d %s', len(self.frame), instantiated)
+            value = self.expandTemplates(instantiated)
+        finally:
+            self.frame.pop()
         # logger.debug('   INVOCATION> %s %d %s', title, len(self.frame), value)
         return value
 
