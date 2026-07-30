@@ -2291,19 +2291,43 @@ def sharp_switch(primary, *params):
 
 
 # Extension Scribuntu
+# Only minimal support for Lua modules invoked via #invoke.
+# FIXME: import real Lua modules (would require a Lua interpreter,
+# which this project doesn't have).
+modules = {
+    'convert': {
+        'convert': lambda x, u, *rest: x + ' ' + u,  # no conversion
+    }
+}
+
+
 def sharp_invoke(module, function, frame):
     functions = modules.get(module)
     if functions:
         funct = functions.get(function)
         if funct:
-            # find parameters in frame whose title is the one of the original
-            # template invocation
-            templateTitle = fullyQualifiedTemplateTitle(function)
-            if not templateTitle:
-                logger.warning("Template with empty title")
-            pair = next((x for x in frame if x[0] == templateTitle), None)
-            if pair:
-                params = pair[1]
+            # Use the innermost (most recently entered) frame entry --
+            # frame is a proper stack (see expandTemplate: appended
+            # right before expanding a template's body, popped right
+            # after), so frame[-1] is exactly the template invocation
+            # that directly encloses this #invoke call, matching real
+            # Scribunto's frame:getParent() semantics.
+            #
+            # Previously this guessed the calling template's title
+            # from the invoked function's own name instead (e.g.
+            # "convert" -> "Template:Convert"), which only worked when
+            # a template's name happened to match the function it
+            # invokes. That breaks for the ordinary case of an
+            # alias-style template with a different name invoking the
+            # same function -- e.g. {{cvt|...}}, a template literally
+            # named "Cvt", invoking the same "convert" function that
+            # "Template:Convert" also invokes under its own, different
+            # name. Confirmed directly: the old lookup silently failed
+            # for {{cvt|...}} specifically while working for
+            # {{convert|...}}, even though both invoke the identical
+            # function.
+            if frame:
+                params = frame[-1][1]
                 # extract positional args
                 params = [params.get(str(i + 1)) for i in range(len(params))]
                 return funct(*params)

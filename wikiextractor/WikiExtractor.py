@@ -129,17 +129,6 @@ templateNamespace = ''
 moduleNamespace = ''
 
 # ----------------------------------------------------------------------
-# Modules
-
-# Only minimal support
-# FIXME: import Lua modules.
-
-modules = {
-    'convert': {
-        'convert': lambda x, u, *rest: x + ' ' + u,  # no conversion
-    }
-}
-# ----------------------------------------------------------------------
 # Expand using WikiMedia API
 # import json
 
