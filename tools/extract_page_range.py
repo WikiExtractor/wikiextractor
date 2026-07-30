@@ -22,11 +22,15 @@ Four modes:
                  </mediawiki> footer as the original, so wikiextractor can
                  process it as a standalone file.
 
-  --extract-id   Find the page with a given <id> and write out just that
-                 one page as a standalone dump, in a single streaming pass
-                 (stops as soon as it's found, rather than needing a
-                 separate --find-id pass first). The simplest way to pull
-                 out one specific page.
+  --extract-id   Find the page(s) with the given <id>(s) and write them out
+                 as a standalone dump, in a single streaming pass (stops as
+                 soon as all requested ids have been found, rather than
+                 needing a separate --find-id pass first, and rather than
+                 always reading to the end of the file). The simplest way
+                 to pull out one or more specific pages. Accepts a single
+                 id or a comma-separated list (e.g. --extract-id 49,59);
+                 pages are written in the order they appear in the source
+                 dump, not the order given on the command line.
 
 Usage:
     python extract_page_range.py --input urwiki-20260701-pages-articles-multistream.xml.bz2 --count
@@ -41,6 +45,9 @@ Usage:
 
     python extract_page_range.py --input urwiki-20260701-pages-articles-multistream.xml.bz2 \
         --extract-id 2376854 --output single_page.xml.bz2
+
+    python extract_page_range.py --input pnwiki-20260701-pages-articles.xml.bz2 \
+        --extract-id 49,59 --output two_pages.xml.bz2
 
 Binary search workflow (for bisecting a stall):
     1. --count to get total page count N.
@@ -68,6 +75,30 @@ import argparse
 import bz2
 import re
 import sys
+
+
+def parse_id_list(s):
+    """
+    argparse type for --extract-id: accepts either a single id ("49")
+    or a comma-separated list ("49,59"). Whitespace around each entry
+    is tolerated. Returns a list of ints, in the order given (though
+    do_extract_ids() writes pages in source-dump order regardless,
+    not this order).
+    """
+    ids = []
+    for part in s.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"invalid id {part!r} in --extract-id {s!r} -- expected an "
+                f"integer, or a comma-separated list of integers")
+    if not ids:
+        raise argparse.ArgumentTypeError(f"--extract-id {s!r} contained no ids")
+    return ids
 
 
 def open_maybe_bz2_read(path):
@@ -180,16 +211,22 @@ def do_extract(input_path, output_path, start, end):
               "page count (use --count first).", file=sys.stderr)
 
 
-def do_extract_id(input_path, output_path, page_id):
+def do_extract_ids(input_path, output_path, page_ids):
     """
-    Find the page with the given <id> and write out just that one page as
-    a standalone dump. Single streaming pass: stops as soon as the
-    matching page is found, rather than requiring a separate --find-id
-    pass beforehand.
+    Find the page(s) with the given <id>(s) and write them out as a
+    standalone dump. Single streaming pass: stops as soon as every
+    requested id has been found, rather than requiring a separate
+    --find-id pass beforehand, and rather than always reading to the
+    end of the file regardless of how early the matches turn up.
+
+    Pages are written in the order they're encountered in the source
+    dump, not the order given in page_ids -- simpler, and matches how
+    --start/--end already behaves.
     """
     header = None
     footer = '</mediawiki>\n'
-    found = False
+    still_needed = set(page_ids)
+    found_ids = []
 
     out = open_maybe_bz2_write(output_path)
     try:
@@ -199,21 +236,23 @@ def do_extract_id(input_path, output_path, page_id):
                 out.write(header)
             elif kind == 'page':
                 m = re.search(r'<id>(\d+)</id>', text)
-                if m and m.group(1) == str(page_id):
+                if m and int(m.group(1)) in still_needed:
                     out.write(text)
-                    found = True
-                    break
+                    found_ids.append(int(m.group(1)))
+                    still_needed.discard(int(m.group(1)))
+                    if not still_needed:
+                        break
             elif kind == 'footer':
                 footer = text
         out.write(footer)
     finally:
         out.close()
 
-    if found:
-        print(f"Wrote page id {page_id} to {output_path}")
-    else:
-        print(f"WARNING: page id {page_id} not found -- wrote an empty "
-              f"dump (header+footer only) to {output_path}", file=sys.stderr)
+    print(f"Wrote {len(found_ids)} page(s) ({', '.join(str(i) for i in found_ids)}) "
+          f"to {output_path}")
+    if still_needed:
+        missing = ', '.join(str(i) for i in sorted(still_needed))
+        print(f"WARNING: {len(still_needed)} id(s) not found: {missing}", file=sys.stderr)
 
 
 def main():
@@ -222,7 +261,9 @@ def main():
     ap.add_argument('--input', required=True, help='Path to the source dump (.xml or .xml.bz2)')
     ap.add_argument('--count', action='store_true', help='Just count total <page> elements and exit')
     ap.add_argument('--find-id', type=int, help='Report the ordinal position of the page with this <id> and exit')
-    ap.add_argument('--extract-id', type=int, help='Find and write out just the single page with this <id> (requires --output)')
+    ap.add_argument('--extract-id', type=parse_id_list,
+                     help='Find and write out the page(s) with this <id> -- a single '
+                          'id, or a comma-separated list, e.g. 49,59 (requires --output)')
     ap.add_argument('--start', type=int, help='Start page index (0-based, inclusive)')
     ap.add_argument('--end', type=int, help='End page index (exclusive)')
     ap.add_argument('--output', help='Output path (.xml or .xml.bz2)')
@@ -239,7 +280,7 @@ def main():
     if args.extract_id is not None:
         if not args.output:
             ap.error('--extract-id requires --output')
-        do_extract_id(args.input, args.output, args.extract_id)
+        do_extract_ids(args.input, args.output, args.extract_id)
         return
 
     if args.start is None or args.end is None or not args.output:
