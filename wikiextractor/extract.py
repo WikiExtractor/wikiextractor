@@ -51,6 +51,35 @@ syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlig
 knownNamespaces = set(['Template'])
 
 ##
+# The #REDIRECT keyword, localized. MediaWiki's real redirect magic
+# word has a per-wiki-language translation (e.g. Sindhi's own content
+# language uses "چوريو" instead of "REDIRECT"), separate from the
+# interface language -- matching only the English form meant a
+# redirect page in a non-English wiki wasn't recognized as a redirect
+# at all, and its entire (often stale, pre-redirect) body text got
+# treated as the template's real content instead.
+#
+# Confirmed for Sindhi specifically: found "#چوريو [[Target]]" as the
+# very first line of two separate, independent template pages in a
+# real Sindhi Wikipedia dump (both structurally identical to a
+# standard redirect: hash-prefixed keyword immediately followed by a
+# wikilink, as the first thing on the page), and confirmed directly
+# that treating it as a redirect (rather than as literal template
+# body text) eliminates a real, reproduced content-leak bug. Not
+# confirmed against MediaWiki's own localization source specifically
+# (couldn't get a fetchable copy of it), but multiple independent
+# structural signals plus the direct empirical fix both point the same
+# way.
+#
+# Extensible: add further confirmed, per-language keywords here as
+# they turn up on other wikis, rather than guessing translations
+# preemptively for languages not yet actually encountered.
+redirectKeywords = ['REDIRECT', 'چوريو']
+redirectRE = re.compile(
+    r'#(?:%s)\b.*?\[\[([^\]]*)]]' % '|'.join(redirectKeywords),
+    re.IGNORECASE)
+
+##
 # Drop these elements from article text
 #
 discardElements = [
@@ -2446,7 +2475,7 @@ def define_template(title, page):
         return
 
     # check for redirects
-    m = re.match(r'#REDIRECT.*?\[\[([^\]]*)]]', page[0], re.IGNORECASE)
+    m = redirectRE.match(page[0])
     if m:
         redirects[title] = m.group(1)  # normalizeTitle(m.group(1))
         return
