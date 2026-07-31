@@ -223,7 +223,22 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     # Drop discarded elements
     for tag in discardElements:
         close_pattern = r'<\s*/\s*%s\s*>' % tag
-        text = dropNested(text, r'<\s*%s\b[^>/]*>' % tag, close_pattern)
+        # [^>]*(?<!/) rather than [^>/]*: attribute values can
+        # legitimately contain a literal '/' (e.g. a ref name like
+        # "geo/18aug2018-1"), which the old, blanket '/'-excluding
+        # character class broke on -- the opening tag simply failed
+        # to match at all, surviving as literal text, while its
+        # closing tag (left unpaired) got correctly stripped by the
+        # orphaned-close-tag handling below, producing a mismatched
+        # "closing tag vanished, opening tag remains" result. Only a
+        # '/' immediately before the final '>' should be excluded here
+        # -- that's a genuine self-closing tag (e.g. <ref name="x" />,
+        # already handled separately by selfClosing_tag_patterns
+        # above), not a wrapping open that discardElements should
+        # pair up.
+        # An example of this occurred in doc 1795 (and many others)
+        # in the Saraiki wiki dump of 2026-07-01
+        text = dropNested(text, r'<\s*%s\b[^>]*(?<!/)>' % tag, close_pattern)
         # dropNested only ever removes a close tag as part of a
         # matched (open, close) pair -- an unpaired one
         # (its own opening tag consumed or malformed elsewhere, e.g. by
