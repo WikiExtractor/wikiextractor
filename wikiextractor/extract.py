@@ -193,7 +193,19 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
 
     # Drop discarded elements
     for tag in discardElements:
-        text = dropNested(text, r'<\s*%s\b[^>/]*>' % tag, r'<\s*/\s*%s>' % tag)
+        close_pattern = r'<\s*/\s*%s\s*>' % tag
+        text = dropNested(text, r'<\s*%s\b[^>/]*>' % tag, close_pattern)
+        # dropNested only ever removes a close tag as part of a
+        # matched (open, close) pair -- an unpaired one
+        # (its own opening tag consumed or malformed elsewhere, e.g. by
+        # a failed nested template expansion earlier on the same page)
+        # is left completely untouched by its pairing logic, rather
+        # than throwing off matching for the rest of the document.
+        # So anything still matching close_pattern at this point is
+        # genuinely orphaned within this text -- same "strip the stray
+        # tag rather than guess at pairing" approach as the noinclude
+        # handling below.
+        text = re.sub(close_pattern, '', text, flags=re.IGNORECASE)
 
     # Any <noinclude>/</noinclude> still remaining at this point is
     # genuinely unmatched within this page's own text -- a properly
