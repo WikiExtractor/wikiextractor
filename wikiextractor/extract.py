@@ -236,9 +236,17 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
         # already handled separately by selfClosing_tag_patterns
         # above), not a wrapping open that discardElements should
         # pair up.
-        # An example of this occurred in doc 1795 (and many others)
-        # in the Saraiki wiki dump of 2026-07-01
-        text = dropNested(text, r'<\s*%s\b[^>]*(?<!/)>' % tag, close_pattern)
+        # (?=(...))\1 emulates an atomic/possessive match for the
+        # quoted alternatives (see lineBreak_tag_patterns above for
+        # the full reasoning) -- needed here specifically because
+        # without it, the (?<!/) exclusion below can force a
+        # backtrack that falls back to treating quote characters as
+        # plain [^>] matches, finding a WRONG match that ends at a
+        # quoted value's own inner '>' instead of failing to match
+        # (correctly) on a genuine self-closing tag like
+        # <ref style="a > b" />.
+        text = dropNested(text, r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*(?<!/)>''' % tag,
+                           close_pattern)
         # dropNested only ever removes a close tag as part of a
         # matched (open, close) pair -- an unpaired one
         # (its own opening tag consumed or malformed elsewhere, e.g. by
@@ -1193,8 +1201,14 @@ selfClosing_tag_patterns = [
     # MediaWiki usage (it loads CSS for a template's rendering, never
     # wraps real content), so the strict pattern doesn't lose anything
     # for it either.
-    re.compile(r'<\s*%s\b[^>]*/?\s*>' % tag if tag == 'nobr'
-               else r'<\s*%s\b[^>]*/\s*>' % tag,
+    # (?=(...))\1 emulates an atomic/possessive match for the quoted
+    # alternatives (see lineBreak_tag_patterns below for the full
+    # reasoning) -- without it, a literal '>' inside a quoted
+    # attribute value (e.g. <ref style="a > b" />) would prevent this
+    # from matching at all, since [^>]* alone stops at that inner '>'
+    # and can never find the real, required trailing '/' after it.
+    re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*/?\s*>''' % tag if tag == 'nobr'
+               else r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*/\s*>''' % tag,
                re.DOTALL | re.IGNORECASE)
     for tag in selfClosingTags
 ]
@@ -1205,7 +1219,19 @@ selfClosing_tag_patterns = [
 # or even a bare <br> -- is just as valid a "line break" instance as
 # <br/>), but substituted with a space instead of bulk-deleted.
 lineBreak_tag_patterns = [
-    re.compile(r'<\s*%s\b[^>]*/?\s*>' % tag, re.DOTALL | re.IGNORECASE)
+    # (?=(...))\1 emulates an atomic/possessive match for the quoted
+    # alternatives, portably (works pre-3.11 too, unlike native atomic
+    # groups): once a quoted string is matched, the engine can never
+    # backtrack into re-interpreting its own quote characters as
+    # individual [^>] matches -- confirmed directly this matters, not
+    # just theoretical: without it, a literal '>' inside a quoted
+    # attribute value (e.g. <br style="a > b" />, legal HTML -- a
+    # literal '>' inside a quoted value doesn't end the tag, confirmed
+    # against a real HTML tokenizer) truncates the match early, at
+    # that inner '>', leaving the tag's own real ending stranded as
+    # literal text afterward.
+    re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*>''' % tag,
+               re.DOTALL | re.IGNORECASE)
     for tag in lineBreakTags
 ]
 
