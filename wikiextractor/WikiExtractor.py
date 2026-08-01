@@ -259,6 +259,15 @@ def load_templates(file, output_file=None):
                     Extractor.templatePrefix = title[:colon + 1]
             # FIXME: should reconstruct also moduleNamespace
         elif tag == 'text':
+            tag_end = line.index('>', m.start(2))
+            if line[tag_end - 1] == '/':
+                # See the identical fix and comment in collect_pages()
+                # -- self-closing <text .../> (a revision with no
+                # content) previously left inText stuck True forever,
+                # silently merging every subsequent line, including
+                # the next template's own metadata and body, into
+                # whatever entry was currently being built.
+                continue
             inText = True
             line = line[m.start(3):m.end(3)]
             page.append(line)
@@ -343,6 +352,17 @@ def collect_pages(text):
         elif tag == 'redirect':
             redirect = True
         elif tag == 'text':
+            tag_end = line.index('>', m.start(2))
+            if line[tag_end - 1] == '/':
+                # <text bytes="0" .../> -- a revision with no content
+                # at all. No matching </text> will ever arrive for
+                # this specific tag, since it's self-closing; treating
+                # it as an ordinary, still-open text element (as
+                # before this fix) left inText stuck True forever,
+                # silently merging every subsequent line -- including
+                # the next page's own metadata and content -- into
+                # this (empty) page.
+                continue
             inText = True
             line = line[m.start(3):m.end(3)]
             page.append(line)

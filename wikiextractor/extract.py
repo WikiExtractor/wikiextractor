@@ -2433,6 +2433,18 @@ def define_template(title, page):
 
     # title = normalizeTitle(title)
 
+    # An empty page (zero lines) is a genuine, valid case for a
+    # template whose current revision has no content at all (a
+    # self-closing <text bytes="0" .../> in the source) -- not a
+    # redirect, and not any real content either. Confirmed this is
+    # reachable now that collect_pages()/load_templates() correctly
+    # recognize that self-closing form instead of silently merging the
+    # next page's content into this one (which previously masked this
+    # case entirely, since page was never actually empty by the time
+    # it reached here).
+    if not page:
+        return
+
     # check for redirects
     m = re.match(r'#REDIRECT.*?\[\[([^\]]*)]]', page[0], re.IGNORECASE)
     if m:
