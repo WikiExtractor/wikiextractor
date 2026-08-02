@@ -287,7 +287,7 @@ def compact(text, mark_headers=False):
 
     for line in text.split('\n'):
 
-        if not line:
+        if not line.strip():
             if len(listLevel):    # implies Extractor.HtmlFormatting
                 for c in reversed(listLevel):
                     page.append(listClose[c])
