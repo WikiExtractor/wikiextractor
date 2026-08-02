@@ -1289,7 +1289,21 @@ class Template(list):
         # {{#if:{{{{{#if:{{{nominee|}}}|nominee|candidate}}|}}}|
         #
         start = 0
-        for s,e in findMatchingBraces(body, 3):
+        for s, e in findMatchingBraces(body, 3):
+            # findMatchingBraces() only resolves one level of the
+            # more-than-3-braces ambiguity, leaving further,
+            # immediately-adjacent brace layers as opaque text. Real
+            # MediaWiki syntax allows indefinite nesting here -- a
+            # parameter whose name is itself a parameter, arbitrarily
+            # deep. So widen the span outward by 3 for each additional
+            # adjacent "{"/"}" layer before treating what's left as
+            # this tplarg's own content -- the normal recursive
+            # Template.parse() call on that (wider) content then
+            # discovers each further nested layer in turn.
+            while (s >= 3 and e + 3 <= len(body)
+                   and body[s - 3:s] == '{{{' and body[e:e + 3] == '}}}'):
+                s -= 3
+                e += 3
             tpl.append(TemplateText(body[start:s]))
             tpl.append(TemplateArg(body[s+3:e-3]))
             start = e
@@ -1931,7 +1945,17 @@ def findMatchingBraces(text, ldelim=0):
         if not m1:
             return
         lmatch = m1.end() - m1.start()
+        m1start = m1.start()
         if m1.group()[0] == '{':
+            if lmatch > 3:
+                # More than 3 consecutive opening braces: per the
+                # documented rule above, only the rightmost 3 belong to
+                # this (innermost) match -- the excess, leftmost braces
+                # belong to some outer level, and are deliberately left
+                # unconsumed here (as plain text, from this function's
+                # point of view) rather than folded into this match.
+                m1start += lmatch - 3
+                lmatch = 3
             stack = [lmatch]  # stack of opening braces lengths
         else:
             stack = [-lmatch]  # negative means [
@@ -1960,12 +1984,12 @@ def findMatchingBraces(text, ldelim=0):
                         stack.append(openCount - lmatch)
                         break
                 if not stack:
-                    yield m1.start(), end - lmatch
+                    yield m1start, end - lmatch
                     cur = end
                     break
                 elif len(stack) == 1 and 0 < stack[0] < ldelim:
                     # ambiguous {{{{{ }}} }}
-                    yield m1.start() + stack[0], end
+                    yield m1start + stack[0], end
                     cur = end
                     break
             elif brac == '[':  # [[
