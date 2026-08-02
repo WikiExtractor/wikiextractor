@@ -244,7 +244,7 @@ def main():
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--templates', required=True, help='Path to the large templates file (.xml or .xml.bz2)')
     ap.add_argument('--input', required=True, help='Path to the page dump containing the page(s) in question')
-    ap.add_argument('--ids', required=True, type=parse_id_list,
+    ap.add_argument('--extract-id', required=True, type=parse_id_list,
                      help='Page id(s) to find referenced templates for -- a single id, '
                           'or a comma-separated list, e.g. 49,59')
     ap.add_argument('--output', required=True, help='Output path for the extracted templates (.xml or .xml.bz2)')
@@ -254,7 +254,7 @@ def main():
 
     import wikiextractor.extract as ex
 
-    pages = get_pages_wikitext_by_id(args.input, args.ids)
+    pages = get_pages_wikitext_by_id(args.input, args.extract_id)
     if not pages:
         print("No requested pages were found -- nothing to look up.", file=sys.stderr)
         sys.exit(1)
