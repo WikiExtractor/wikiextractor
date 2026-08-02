@@ -52,24 +52,11 @@ knownNamespaces = set(['Template'])
 
 ##
 # The #REDIRECT keyword, localized. MediaWiki's real redirect magic
-# word has a per-wiki-language translation (e.g. Sindhi's own content
-# language uses "چوريو" instead of "REDIRECT"), separate from the
-# interface language -- matching only the English form meant a
-# redirect page in a non-English wiki wasn't recognized as a redirect
-# at all, and its entire (often stale, pre-redirect) body text got
-# treated as the template's real content instead.
-#
-# Confirmed for Sindhi specifically: found "#چوريو [[Target]]" as the
-# very first line of two separate, independent template pages in a
-# real Sindhi Wikipedia dump (both structurally identical to a
-# standard redirect: hash-prefixed keyword immediately followed by a
-# wikilink, as the first thing on the page), and confirmed directly
-# that treating it as a redirect (rather than as literal template
-# body text) eliminates a real, reproduced content-leak bug. Not
-# confirmed against MediaWiki's own localization source specifically
-# (couldn't get a fetchable copy of it), but multiple independent
-# structural signals plus the direct empirical fix both point the same
-# way.
+# word has a per-wiki-language translation (e.g. Sindhi uses "چوريو"
+# instead of "REDIRECT"), separate from the interface language --
+# matching only the English form meant a redirect page in a non-
+# English wiki wasn't recognized as a redirect at all, and its entire
+# (often stale, pre-redirect) body text got treated as real content.
 #
 # Extensible: add further confirmed, per-language keywords here as
 # they turn up on other wikis, rather than guessing translations
@@ -168,36 +155,21 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     # br/hr carry genuine line-break semantics: unlike a comment or a
     # citation marker, deleting one with nothing in its place can
     # merge two adjacent words together if there was no surrounding
-    # whitespace in the source (a real, confirmed case on Saraiki
-    # Wikipedia: "اُٹھا<br>رب" with no spaces at all around the tag,
-    # which would otherwise become "اُٹھارب" -- two words fused into
-    # one). Substitute these with a space, but only where there's
-    # actually something to merge with on both sides -- a line-break
-    # tag sitting at the very start/end of a line (immediately next to
-    # a newline, or at the start/end of the text) needs no additional
-    # separator, since there's nothing on the empty side to merge
-    # with; adding one there just creates an invisible leading or
-    # trailing space that doesn't affect meaning but does clutter
-    # every diff against such a line.
+    # whitespace in the source. Substitute with a space, but only
+    # where there's actually something to merge with on both sides --
+    # a tag at the very start/end of a line needs no separator, since
+    # adding one there just clutters every diff against that line.
     #
     # This MUST run before any of the span-collecting steps below:
-    # substituteLineBreakTag() changes text's length (a longer tag
-    # collapses to a single space), so any span collected beforehand
-    # (comments, self-closing tags, ignored tags) would hold stale
-    # positions once dropSpans() later runs against the shifted text
-    # -- a real, confirmed bug found on a real Urdu Wikipedia article
-    # ("محمد علی جناح"/Muhammad Ali Jinnah, id 1086): two of six HTML
-    # comments after a br/hr substitution earlier in the article
-    # survived untouched, because dropSpans() ended up removing the
-    # wrong span of characters entirely, at positions that no longer
-    # corresponded to where those comments actually were.
+    # substituteLineBreakTag() changes text's length, so any span
+    # collected beforehand (comments, self-closing tags, ignored tags)
+    # would hold stale positions once dropSpans() later runs against
+    # the shifted text.
     for pattern in lineBreak_tag_patterns:
         text = substituteLineBreakTag(pattern, text)
 
-    # Same must-run-before-span-collection reasoning as the br/hr
-    # substitution just above applies here too: this also mutates
-    # text's length, so it has to happen before anything else records
-    # a position into this same text.
+    # Same must-run-before-span-collection reasoning as above: this
+    # also mutates text's length.
     for pattern in block_separator_tag_patterns:
         text = substituteLineBreakTag(pattern, text, separator='\n')
 
@@ -226,38 +198,25 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
         close_pattern = r'<\s*/\s*%s\s*>' % tag
         # [^>]*(?<!/) rather than [^>/]*: attribute values can
         # legitimately contain a literal '/' (e.g. a ref name like
-        # "geo/18aug2018-1"), which the old, blanket '/'-excluding
-        # character class broke on -- the opening tag simply failed
-        # to match at all, surviving as literal text, while its
-        # closing tag (left unpaired) got correctly stripped by the
-        # orphaned-close-tag handling below, producing a mismatched
-        # "closing tag vanished, opening tag remains" result. Only a
-        # '/' immediately before the final '>' should be excluded here
-        # -- that's a genuine self-closing tag (e.g. <ref name="x" />,
-        # already handled separately by selfClosing_tag_patterns
-        # above), not a wrapping open that discardElements should
-        # pair up.
+        # "geo/18aug2018-1"), so only a '/' immediately before the
+        # final '>' is excluded -- that's a genuine self-closing tag
+        # (already handled separately by selfClosing_tag_patterns
+        # above), not a wrapping open for discardElements to pair up.
         # (?=(...))\1 emulates an atomic/possessive match for the
-        # quoted alternatives (see lineBreak_tag_patterns above for
-        # the full reasoning) -- needed here specifically because
-        # without it, the (?<!/) exclusion below can force a
-        # backtrack that falls back to treating quote characters as
-        # plain [^>] matches, finding a WRONG match that ends at a
-        # quoted value's own inner '>' instead of failing to match
-        # (correctly) on a genuine self-closing tag like
-        # <ref style="a > b" />.
+        # quoted alternatives (see lineBreak_tag_patterns above) --
+        # needed here specifically because without it, the (?<!/)
+        # exclusion can force a backtrack that falls back to plain
+        # [^>] matching, wrongly ending at a quoted value's own inner
+        # '>' instead of correctly failing to match a genuine self-
+        # closing tag like <ref style="a > b" />.
         text = dropNested(text, r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*(?<!/)>''' % tag,
                            close_pattern)
-        # dropNested only ever removes a close tag as part of a
-        # matched (open, close) pair -- an unpaired one
-        # (its own opening tag consumed or malformed elsewhere, e.g. by
-        # a failed nested template expansion earlier on the same page)
-        # is left completely untouched by its pairing logic, rather
-        # than throwing off matching for the rest of the document.
-        # So anything still matching close_pattern at this point is
-        # genuinely orphaned within this text -- same "strip the stray
-        # tag rather than guess at pairing" approach as the noinclude
-        # handling below.
+        # dropNested only removes a close tag as part of a matched
+        # pair -- an unpaired one (its own open consumed or malformed
+        # elsewhere) is left untouched by its pairing logic. So
+        # anything still matching close_pattern at this point is
+        # genuinely orphaned -- same "strip the stray tag" approach as
+        # the noinclude handling below.
         text = re.sub(close_pattern, '', text, flags=re.IGNORECASE)
 
     # Any <noinclude>/</noinclude> still remaining at this point is
@@ -267,8 +226,7 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     # template-specific construct; its most likely source in a
     # REGULAR article (not a template page) is misplaced markup a
     # human editor accidentally copy-pasted directly from a template,
-    # confirmed on a real PNB Wikipedia article ("اربیم"/Erbium,
-    # id 113) where the closing tag appears BEFORE its "opening"
+    # sometimes with the closing tag appearing BEFORE its "opening"
     # counterpart -- structurally out of order, so they can never be
     # matched to each other as a pair at all, no matter how the
     # matching logic works. Rather than guess at what content was
@@ -801,21 +759,13 @@ def neutralizeUnclosedLinkOpens(text):
     logic, so this never "blames" a bracket that findBalanced() itself
     wouldn't already treat the same way on the raw, uncollapsed text --
     it only prevents one permanently-unmatched opening from poisoning
-    everything after it. An earlier version of this function bounded
-    detection to a single paragraph specifically to avoid long-distance
-    accidental pairing with an unrelated stray bracket elsewhere in the
-    same article, but that turned out to cause a worse, confirmed
-    problem in practice: a real File: link (English Wikipedia,
-    "Asterix") has a <ref>...</ref> citation, nested inside its image
-    caption, that itself contains a genuine blank line before its
-    closing tag -- entirely legitimate wikitext, just untidy
-    formatting. Paragraph-bounding incorrectly treated the File: link's
-    opening as unclosed (since its true close was one blank line away),
-    causing the whole link to survive as literal text instead of being
-    cleanly dropped, exactly the correct behavior it has without this
-    fix at all. Whole-text detection resolves this correctly, since the
-    true closing "]]" is found and paired normally, no differently
-    than findBalanced() would have paired it on its own.
+    everything after it. Paragraph-bounding was tried first, but
+    causes a worse problem: a File: link whose citation/caption
+    content spans a blank line (legitimate, if untidy, wikitext) gets
+    its true closing "]]" treated as out of reach, so the whole link
+    survives as literal text instead of being dropped normally.
+    Whole-text detection avoids this, since the true close is still
+    found and paired the same way findBalanced() would pair it anyway.
     """
     unclosed = findUnclosedLinkOpenPositions(text)
     if not unclosed:
@@ -1063,13 +1013,12 @@ selfClosingTags = ('nobr', 'ref', 'references', 'nowiki', 'templatestyles', 'sec
 # Block-level by default HTML semantics (a real browser renders an
 # implicit line break around each of these), unlike the rest of
 # ignoredTags below, which are genuinely inline (span, b, i, etc. --
-# no implied break at all, confirmed against real HTML tokenizer/CSS
-# default-display behavior). Stripped the same tag-syntax-removed,
+# no implied break at all). Stripped the same tag-syntax-removed,
 # content-kept way, but via a newline substitution (see
 # substituteLineBreakTag()) rather than plain deletion -- otherwise
 # two adjacent blocks with no whitespace between them in the source
-# fuse into one run-on string, the same class of bug as the earlier
-# br/hr word-merging fix, just for a different set of tags. A newline
+# fuse into one run-on string, the same class of bug as the br/hr
+# word-merging fix, just for a different set of tags. A newline
 # specifically (not just a space) to match how compact() already
 # treats section/paragraph boundaries elsewhere in this file: wikitext
 # "==heading==" is only recognized when it's on its own line
@@ -1184,30 +1133,25 @@ for tag in ignoredTags:
 
 # Match selfClosing HTML tags
 selfClosing_tag_patterns = [
-    # nobr is treated the same permissive way as br/hr for matching
-    # purposes (optional trailing slash), since a bare, unclosed
-    # <nobr> is the same kind of stray/orphaned tag -- but unlike
-    # br/hr, "no line break" doesn't call for inserting a space where
-    # the tag was, so it stays in the pure-deletion group below rather
-    # than moving to lineBreak_tag_patterns.
+    # nobr is treated the same permissive way as br/hr (optional
+    # trailing slash) -- a bare, unclosed <nobr> is a stray tag like
+    # them, but "no line break" doesn't call for inserting a space
+    # where the tag was, so it stays here rather than moving to
+    # lineBreak_tag_patterns.
     #
     # ref/references/nowiki/templatestyles are NOT treated this way:
-    # for ref specifically, the self-closing form has a distinct, real
-    # meaning (e.g. <ref name="x" /> reuses an earlier-defined
-    # reference) from the non-self-closing form (<ref
-    # name="x">actual citation text</ref>, a genuine paired tag with
-    # real content) -- making the slash optional would misidentify the
-    # OPENING of a real paired tag as if it were self-closing.
-    # templatestyles is always used in self-closing form in real
-    # MediaWiki usage (it loads CSS for a template's rendering, never
-    # wraps real content), so the strict pattern doesn't lose anything
-    # for it either.
+    # for ref specifically, self-closing has a distinct, real meaning
+    # (<ref name="x" /> reuses an earlier-defined reference) from the
+    # paired form (<ref name="x">real citation text</ref>) -- making
+    # the slash optional would misidentify a real paired tag's opening
+    # as self-closing. templatestyles is always self-closing in real
+    # usage, so the strict pattern loses nothing there either.
     # (?=(...))\1 emulates an atomic/possessive match for the quoted
-    # alternatives (see lineBreak_tag_patterns below for the full
-    # reasoning) -- without it, a literal '>' inside a quoted
-    # attribute value (e.g. <ref style="a > b" />) would prevent this
-    # from matching at all, since [^>]* alone stops at that inner '>'
-    # and can never find the real, required trailing '/' after it.
+    # alternatives (see lineBreak_tag_patterns below) -- without it, a
+    # literal '>' inside a quoted attribute value (e.g.
+    # <ref style="a > b" />) would prevent matching at all, since
+    # [^>]* alone stops at that inner '>' and never finds the real,
+    # required trailing '/'.
     re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*/?\s*>''' % tag if tag == 'nobr'
                else r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*/\s*>''' % tag,
                re.DOTALL | re.IGNORECASE)
@@ -1224,11 +1168,9 @@ lineBreak_tag_patterns = [
     # alternatives, portably (works pre-3.11 too, unlike native atomic
     # groups): once a quoted string is matched, the engine can never
     # backtrack into re-interpreting its own quote characters as
-    # individual [^>] matches -- confirmed directly this matters, not
-    # just theoretical: without it, a literal '>' inside a quoted
-    # attribute value (e.g. <br style="a > b" />, legal HTML -- a
-    # literal '>' inside a quoted value doesn't end the tag, confirmed
-    # against a real HTML tokenizer) truncates the match early, at
+    # individual [^>] matches. Without it, a literal '>' inside a
+    # quoted attribute value (e.g. <br style="a > b" />, legal HTML --
+    # a quoted '>' doesn't end the tag) truncates the match early, at
     # that inner '>', leaving the tag's own real ending stranded as
     # literal text afterward.
     re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*>''' % tag,
@@ -2507,12 +2449,10 @@ def define_template(title, page):
     # An empty page (zero lines) is a genuine, valid case for a
     # template whose current revision has no content at all (a
     # self-closing <text bytes="0" .../> in the source) -- not a
-    # redirect, and not any real content either. Confirmed this is
-    # reachable now that collect_pages()/load_templates() correctly
-    # recognize that self-closing form instead of silently merging the
-    # next page's content into this one (which previously masked this
-    # case entirely, since page was never actually empty by the time
-    # it reached here).
+    # redirect, and not any real content either. Reachable now that
+    # collect_pages()/load_templates() correctly recognize that
+    # self-closing form instead of silently merging the next page's
+    # content into this one.
     if not page:
         return
 
