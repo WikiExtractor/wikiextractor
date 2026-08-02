@@ -87,7 +87,8 @@ discardElements = [
     'table', 'tr', 'td', 'th', 'caption', 'div',
     'form', 'input', 'select', 'option', 'textarea',
     'ul', 'li', 'ol', 'dl', 'dt', 'dd', 'menu', 'dir',
-    'ref', 'references', 'img', 'imagemap', 'source', 'small'
+    'ref', 'references', 'img', 'imagemap', 'source', 'small',
+    'inputbox'
 ]
 
 ##
@@ -1057,7 +1058,7 @@ magicWordsRE = re.compile('|'.join(MagicWords.switches))
 # ------------------------------------------------------------------------------
 
 lineBreakTags = ('br', 'hr')
-selfClosingTags = ('nobr', 'ref', 'references', 'nowiki', 'templatestyles')
+selfClosingTags = ('nobr', 'ref', 'references', 'nowiki', 'templatestyles', 'section')
 
 # Block-level by default HTML semantics (a real browser renders an
 # implicit line break around each of these), unlike the rest of
@@ -1087,9 +1088,9 @@ blockSeparatorTags = ('p', 'center', 'h1', 'h2', 'h3', 'h4')
 # These tags are dropped, keeping their content.
 # handle 'a' separately, depending on keepLinks
 ignoredTags = (
-    'abbr', 'b', 'big', 'blockquote', 'cite', 'div', 'em',
+    'abbr', 'b', 'bdi', 'big', 'blockquote', 'cite', 'div', 'em',
     'font', 'hiero', 'i', 'kbd', 'nowiki',
-    'plaintext', 'poem', 's', 'span', 'strike', 'strong',
+    'plaintext', 'poem', 's', 'section', 'span', 'strike', 'strong',
     'sub', 'sup', 'tt', 'u', 'var'
 )
 
