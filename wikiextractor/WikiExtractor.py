@@ -856,11 +856,11 @@ def main():
     if args.article:
         if args.templates:
             if os.path.exists(args.templates):
-                with open(args.templates) as file:
+                with decode_open(args.templates) as file:
                     load_templates(file)
 
         urlbase = ''
-        with open(input_file) as input:
+        with decode_open(input_file) as input:
             for id, revid, title, page in collect_pages(input):
                 Extractor(id, revid, urlbase, title, page).extract(sys.stdout)
         return
