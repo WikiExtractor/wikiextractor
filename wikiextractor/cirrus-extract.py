@@ -42,7 +42,10 @@ import bz2
 import gzip
 import logging
 
-from .WikiExtractor import NextFile, OutputSplitter
+try:
+    from .WikiExtractor import NextFile, OutputSplitter
+except ImportError:
+    from WikiExtractor import NextFile, OutputSplitter
 
 # Program version
 version = '3.0'
