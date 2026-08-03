@@ -1176,6 +1176,14 @@ lineBreak_tag_patterns = [
     re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*>''' % tag,
                re.DOTALL | re.IGNORECASE)
     for tag in lineBreakTags
+] + [
+    # br/hr are void elements -- a closing tag is invalid HTML, but a
+    # real, if malformed, editing mistake (someone writing </br> as if
+    # it needed a matching close, same instinct as XHTML-style
+    # self-closing syntax). No attributes are possible on a closing
+    # tag, so no quote-aware matching is needed here.
+    re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE)
+    for tag in lineBreakTags
 ]
 
 # blockSeparatorTags (see the comment there) are substituted with a
