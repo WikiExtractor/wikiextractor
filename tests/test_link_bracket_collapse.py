@@ -1,0 +1,420 @@
+"""
+Tests for the doubled-link-bracket collapse fix in replaceInternalLinks()
+(collapseDoubledLinkBrackets()).
+
+Background
+----------
+A real, surprisingly common wikitext authoring mistake -- doubled link
+brackets like [[[[title]]]] instead of [[title]] -- was found at
+meaningful scale on multiple language wikis: ~150/25000 articles on
+Saraiki Wikipedia, ~15000 on Urdu Wikipedia, and (on Sindhi Wikipedia)
+baked directly into a widely-transcluded interwiki/sister-projects
+table template (e.g. [[[[w:]]]], [[[[wiktionary:]]]], one row per
+sister project) -- meaning a single buggy template can by itself
+account for a large share of the total occurrences on a given wiki.
+
+Before any fix, findBalanced()'s stack-based bracket matcher treated
+the outermost bracket pair as the link delimiter and passed the inner
+bracket pair through untouched as literal text in the link's
+title/label -- i.e. [[[[title]]]] -> [[title]] in the final output
+(brackets reduced but not eliminated).
+
+An earlier version of this fix only collapsed the *opening* side
+(runs of 3+ "[" down to exactly 2), which correctly recovered the
+title but left a residue of stray trailing "]" characters behind in
+the symmetric case (e.g. "title]]"). collapseDoubledLinkBrackets()
+improves on this: it detects when the closing side has a *matching*
+excess immediately following the link's natural close, and in that
+case strips both sides symmetrically for a fully clean result with no
+residue at all. This covers the two most common real-world shapes
+found (fully symmetric doubling, and asymmetric doubling where only
+the opening side was duplicated) with zero residue.
+
+Where the excess doesn't resolve to a clean symmetric match -- e.g. a
+doubled outer wrapper around content that itself contains several
+genuinely separate real links, where the excess closing brackets only
+appear at the very end, not immediately after the first inner link's
+own close -- the fix safely falls back to collapsing just the opening
+side. This still correctly recovers all the real inner links; it just
+may leave a small trailing residue in that narrower, more ambiguous
+case, rather than guessing at a merge that could misinterpret genuine
+structure.
+
+The fix deliberately never touches the closing side on its own, in
+isolation: adjacent closing brackets legitimately occur in real
+wikitext, e.g. [[File:x.jpg|[[real link]]]], where a nested real link
+is the very last thing before the outer link's own close.
+
+Run with:
+    python -m unittest tests.test_link_bracket_collapse -v
+or, from the tests/ directory:
+    python -m unittest test_link_bracket_collapse -v
+"""
+
+import sys
+import unittest
+
+sys.path.insert(0, '..')  # allow running directly from tests/ without installing
+
+import wikiextractor.extract as ex
+
+
+class SymmetricDoublingTests(unittest.TestCase):
+    """The common case: excess opens AND a matching excess of closes
+    immediately following the link's natural close -- should resolve
+    with zero residue.
+    """
+
+    def test_quadruple_bracket_link_resolves_with_no_residue(self):
+        text = "کشمیر دے [[[[پاکستان]]]] دے نال"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "کشمیر دے پاکستان دے نال")
+
+    def test_triple_bracket_variant_no_residue(self):
+        text = "اوہ [[[پاکستان]]] گیا"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "اوہ پاکستان گیا")
+
+    def test_quintuple_bracket_variant_no_residue(self):
+        text = "اوہ [[[[[پاکستان]]]]] گیا"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "اوہ پاکستان گیا")
+
+    def test_interwiki_table_entry_no_residue(self):
+        # Real example from Sindhi Wikipedia's sister-projects/interwiki
+        # table template -- baked into the template itself, so
+        # transcluded (and repeated) across every page that includes it.
+        text = "[[[[w:]]]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "w:")
+
+    def test_symmetric_piped_link_no_residue(self):
+        # Real example from Sindhi Wikipedia (a book citation).
+        text = "[[[[ڀيرو مل مهرچند آڏواڻي|ڀيرومل مهرچند آڏواڻي]]]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "ڀيرومل مهرچند آڏواڻي")
+
+
+class AsymmetricDoublingTests(unittest.TestCase):
+    """Excess opens with no matching excess closes -- these were
+    already clean with the simpler opens-only fix, and remain so here.
+    """
+
+    def test_asymmetric_airport_list_entry_no_residue(self):
+        # Real example from Sindhi Wikipedia (an {{airport-dest-list}}
+        # template usage): 4 opens, only 2 closes.
+        text = "[[[[يوني ايئر(Uni Air)]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "يوني ايئر(Uni Air)")
+
+    def test_asymmetric_category_link(self):
+        # Real example from Sindhi Wikipedia: 4 opens, 2 closes, a
+        # category link (which gets dropped entirely regardless, by
+        # separate pre-existing category-handling logic).
+        text = "[[[[زمرو:دستاويز سانچا]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "")
+
+
+class AmbiguousComplexCaseTests(unittest.TestCase):
+    """A doubled outer wrapper around content containing several
+    genuinely separate real links: the excess closes only appear at
+    the very end, not right after the first inner link's own close,
+    and there's more text after that first inner close -- so this
+    doesn't resolve as a clean symmetric match, and per
+    collapseDoubledLinkBrackets()'s docstring, is left completely
+    untouched rather than partially collapsed.
+
+    An earlier version of this fix partially collapsed this shape
+    (just the opening side) instead, recovering the individual real
+    links with a small residue left over. That was reverted after a
+    real Saraiki Wikipedia case (بزمِ کیفی جامپوری, id 902) showed
+    partial collapse can turn a case that was ACCIDENTALLY correct on
+    the original, fully-unmodified text into something newly broken:
+    [[[[سرائیکی]] زبان|سرائیکی]] already resolves correctly without
+    any fix at all (findBalanced() matches the whole thing as one
+    piece, and the pipe hides the embedded garbage behind a clean
+    label) -- but collapsing just the opening side made the first
+    inner closing pair look like a complete match on its own, ending
+    too early and stranding "زبان|سرائیکی]]" as newly-visible leftover
+    text that was never visible before. See
+    test_real_saraiki_case_that_forced_this_design_change below.
+
+    Leaving this shape completely untouched means the fix can only
+    ever improve on the unmodified behavior, never make a previously-
+    correct case worse -- at the cost of not attempting to also
+    recover the individual real links in this more complex shape,
+    which fall back to exactly what findBalanced() would have done
+    without this fix at all (visible embedded brackets, same as
+    before any of this work existed).
+    """
+
+    def test_real_saraiki_case_that_forced_this_design_change(self):
+        # The case that revealed partial-collapse could regress a
+        # previously-correct result. Must match the original,
+        # completely-unmodified behavior exactly.
+        text = "بزم دے [[اردو]] /[[[[سرائیکی]] زبان|سرائیکی]] شعراء کرام"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "بزم دے اردو /سرائیکی شعراء کرام")
+
+    def test_multi_link_case_left_untouched_not_partially_collapsed(self):
+        # Real example from Sindhi Wikipedia (a motorway infobox row).
+        # This must now match exactly what findBalanced() alone would
+        # produce with no bracket-collapse fix applied at all: the
+        # whole span treated as one piece, embedded brackets visible.
+        text = "[[[[کراچی]] تا [[لاہور]] [[موٹر وے]] (KLM)]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "[[کراچی]] تا [[لاہور]] [[موٹر وے]] (KLM)")
+
+
+class NormalLinkRegressionTests(unittest.TestCase):
+    """Ordinary, well-formed links must be completely unaffected."""
+
+    def test_normal_simple_link_unaffected(self):
+        text = "اوہ [[پاکستان]] گیا"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "اوہ پاکستان گیا")
+
+    def test_normal_piped_link_unaffected(self):
+        text = "اوہ [[پاکستان|ملک]] گیا"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "اوہ ملک گیا")
+
+    def test_two_adjacent_separate_links_unaffected(self):
+        # Two genuinely separate, non-nested links with nothing between
+        # them -- must not be mistaken for one doubled-bracket link.
+        text = "[[پاکستان]][[بھارت]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "پاکستانبھارت")
+
+    def test_log_paste_second_link_processed_independently_of_first_unclosed_bracket(self):
+        # Real example from Sindhi Wikipedia: a maintenance-script log
+        # pasted into a page, containing "[[ [[" -- the first "[[" is
+        # genuinely unclosed (2 opens, only 1 close in this snippet),
+        # unrelated to the doubled-bracket-typo pattern this module
+        # targets. Before neutralizeUnclosedLinkOpens() existed, that
+        # one unclosed bracket coincidentally poisoned everything after
+        # it too, leaving the whole line untouched -- but that was
+        # never verified as "correct", just whatever the old bug
+        # happened to produce. Now the genuinely unclosed first
+        # bracket is correctly isolated, and the second, structurally
+        # well-formed link gets processed on its own merit -- and
+        # since "وڪيپيڊيا" (localized Wikipedia-namespace prefix) isn't
+        # in acceptedNamespaces, it correctly drops to '', same as any
+        # other non-accepted-namespace link. This is more accurate,
+        # not a regression: real MediaWiki's parser doesn't know this
+        # text is "log output" either, and would also attempt to
+        # process that second link on its own.
+        text = "dbk=[[ [[وڪيپيڊيا:اسان_سان_رابطو_ڪريو]] -> foo"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "dbk=[[  -> foo")
+
+
+class LegitimateNestedLinkRegressionTests(unittest.TestCase):
+    """The critical regression check: genuine nested links (real-world
+    pattern for file/image captions containing an actual link) must
+    behave identically to the unpatched baseline.
+    """
+
+    def test_nested_link_with_trailing_caption_text_unaffected(self):
+        # Baseline (unpatched) result for this input: ''
+        text = "[[File:x.jpg|thumb|caption with a [[real link]] inside]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "")
+
+    def test_nested_link_as_last_thing_before_outer_close_unaffected(self):
+        # The exact case that a naive "collapse both sides blindly"
+        # fix breaks: adjacent closing brackets here are genuinely two
+        # separate closes (inner link, then outer link), not a typo.
+        # Baseline (unpatched) result for this input: ''
+        text = "[[File:x.jpg|[[real link]]]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "")
+
+
+class LinkTrailTests(unittest.TestCase):
+    """The "trail" mechanism (tailRE = r'\\w+') is a deliberate,
+    pre-existing MediaWiki feature, not something introduced by the
+    bracket-collapse fix: word characters immediately following a
+    link's closing "]]" get concatenated onto the label with NO space,
+    e.g. [[cat]]s -> "cats" (used constantly on English Wikipedia too).
+    This is worth confirming explicitly because a real Saraiki
+    Wikipedia article was found where a simple, well-formed link with a
+    trail ([[پاکستان]]ی, intended to render as "پاکستانی" -- "Pakistani")
+    was failing to convert at all before this fix, apparently due to a
+    separate doubled-bracket instance earlier in the same article
+    corrupting findBalanced()'s stack for everything downstream. The
+    bracket-collapse fix resolved that as a side effect, so it's worth
+    locking in that trails keep working correctly, both on their own
+    and specifically when combined with a doubled-bracket link.
+    """
+
+    def test_simple_trail_concatenates_with_no_space(self):
+        text = "the [[cat]]s sat down"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "the cats sat down")
+
+    def test_real_saraiki_trail_example(self):
+        # The real case found in the wild: a normal, non-doubled link
+        # with a trail suffix forming the adjectival form "Pakistani".
+        text = "آزاد کشمیر اسمبلی ، [[پاکستان]]ی کشمیر دا قانون"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "آزاد کشمیر اسمبلی ، پاکستانی کشمیر دا قانون")
+
+    def test_trail_on_a_doubled_bracket_link_still_works(self):
+        # Combining both mechanisms: a doubled-bracket link (which goes
+        # through collapseDoubledLinkBrackets first) should still have
+        # its trail suffix correctly attached afterward, with no space
+        # and no leftover brackets.
+        text = "the [[[[cat]]]]s sat down"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "the cats sat down")
+
+
+class DoubledBracketWithGenuineNestingTests(unittest.TestCase):
+    """A doubled-bracket link whose content itself contains a genuinely
+    separate, properly-nested real link (e.g. a File: caption with an
+    actual [[link]] inside it) -- found in the wild on a real Saraiki
+    Wikipedia article (id 786, "امڑی"): a doubled File: link wrapping an
+    image caption that itself links to [[غلام]].
+
+    This is harder than the plain symmetric case: a naive "find the
+    first ']]'" scan gets fooled by the inner link's own closing pair,
+    mistaking it for the outer link's natural close, and ends up
+    consuming only one of the outer link's several excess closing
+    brackets -- leaving stray residue behind even though the whole
+    thing should disappear entirely (File: links are dropped by
+    existing, separate namespace-handling logic). The fix uses
+    findBalanced() itself (via a small "pseudo" prefix trick) to find
+    the outer link's true natural close, correctly skipping over the
+    inner nested link, rather than a naive first-match scan.
+    """
+
+    def test_doubled_file_link_with_nested_real_link_fully_dropped(self):
+        # Real example from Saraiki Wikipedia.
+        text = "[[[[فائل:G M Lakha.jpg|thumb|[[غلام]] مرتضٰی لاکھا]]]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "")
+
+    def test_doubled_plain_link_with_nested_real_link_resolves_cleanly(self):
+        # A non-File: variant of the same shape, to confirm the fix
+        # generalizes and isn't specific to File: links being dropped.
+        # Note: the nested [[real link]] inside the label isn't itself
+        # recursively re-converted in a single pass -- that's
+        # pre-existing behavior unrelated to this fix. What matters
+        # here is that the OUTER doubled brackets resolve cleanly with
+        # no residue.
+        text = "[[[[Some Page|caption with a [[real link]] inside]]]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "caption with a [[real link]] inside")
+
+
+class UnclosedLinkOpenTests(unittest.TestCase):
+    """A single genuinely unclosed link opening (e.g. [[1198 -- an
+    ordinary, easy-to-make typo: forgetting the closing "]]") should
+    not poison findBalanced()'s stack for the rest of the article.
+    Before neutralizeUnclosedLinkOpens() existed, one such typo
+    anywhere would silently disable ALL subsequent link conversion,
+    even for several unrelated, perfectly well-formed links much
+    later in the same article -- found in the wild on a real Saraiki
+    Wikipedia article ("ابن رشد" / Averroes, id 296).
+
+    Detection is deliberately NOT bounded to a single paragraph. An
+    earlier version bounded it that way specifically to avoid a
+    genuinely unclosed bracket accidentally pairing with an unrelated
+    stray "]]" much later in the same article -- but that turned out
+    to cause a worse, CONFIRMED problem: a real File: link (English
+    Wikipedia, "Asterix", id 2101) has a <ref>...</ref> citation nested
+    in its image caption that itself contains a genuine blank line
+    before its closing tag (untidy but entirely legitimate wikitext).
+    Paragraph-bounding incorrectly treated the File: link's opening as
+    unclosed, since its true closing "]]" was one blank line away --
+    causing the whole link to survive as literal text instead of being
+    cleanly dropped, which is what it correctly does without this fix
+    at all. See test_real_asterix_file_link_with_blank_line_in_ref
+    below.
+    """
+
+    def test_real_asterix_file_link_with_blank_line_in_ref(self):
+        # Real example from English Wikipedia ("Asterix", id 2101): a
+        # File: link's caption contains a nested real link AND a
+        # <ref>...</ref> citation with a genuine blank line inside it,
+        # before the outer File: link's own closing "]]". The whole
+        # File: link (including the nested link inside its caption)
+        # must still be dropped entirely, exactly as it is without any
+        # of this fix -- and the later, unrelated links in the
+        # following paragraph must also correctly convert.
+        text = (
+            "==Publication history==\n"
+            "[[File:Evariste-Vital Luminais - Goths traversant une rivière.jpg"
+            "|thumb|[[Évariste Vital Luminais]]' (1821\u20131896) paintings of Goths "
+            "had been rather popular in France and are a possible model for the "
+            "''Asterix'' series.<ref>{{Cite book|title = Luminais Musée des "
+            "beaux-arts|publisher = Dominique Dussol: Evariste Vital|year = 2002"
+            "|page = 32}}\n\n&nbsp;\n</ref>]]\n"
+            "Prior to creating the ''Asterix'' series, Goscinny and Uderzo had "
+            "had success with their series ''[[Oumpah-pah]]'', which was "
+            "published in ''[[Tintin (magazine)|Tintin]]'' magazine."
+        )
+        result = ex.replaceInternalLinks(text)
+
+        self.assertNotIn("[[File:", result)
+        self.assertNotIn("Évariste Vital Luminais", result)  # dropped along with the whole File: link
+        self.assertIn("Oumpah-pah", result)
+        self.assertNotIn("[[Oumpah-pah", result)
+        self.assertIn("Tintin", result)
+        self.assertNotIn("[[Tintin", result)
+
+    def test_real_ibn_rushd_example_recovers_all_later_links(self):
+        # Real example from Saraiki Wikipedia. The malformed [[1198ء)
+        # (missing its closing "]]") must stay exactly as broken as it
+        # was, while فلکیات and مذہب -- perfectly well-formed links
+        # appearing later in the same text -- must now correctly
+        # convert instead of being silently swallowed.
+        text = (
+            "وفات: 10 دسمبر [[1198ء) مسلم فلسفی، ماہر [[فلکیات]] تے مقنن ہن۔\n"
+            "[[مذہب]] تے فلسفیانہ حقیقت"
+        )
+        result = ex.replaceInternalLinks(text)
+
+        self.assertIn("[[1198ء)", result)  # left exactly as broken
+        self.assertIn("فلکیات", result)
+        self.assertNotIn("[[فلکیات", result)
+        self.assertIn("مذہب", result)
+        self.assertNotIn("[[مذہب", result)
+
+    def test_unclosed_open_does_not_affect_an_earlier_closed_link(self):
+        # The precise-detection check: a properly closed link BEFORE
+        # the genuinely unclosed one must not be misidentified as the
+        # broken one. A naive "neutralize the first N excess opens"
+        # heuristic would get this wrong.
+        text = "[[A]] and [[B stays open"
+        result = ex.replaceInternalLinks(text)
+        self.assertEqual(result, "A and [[B stays open")
+
+    def test_multiple_well_formed_links_after_an_unclosed_one_all_recover(self):
+        text = "[[broken (no close and [[first]] and [[second]] and [[third]]"
+        result = ex.replaceInternalLinks(text)
+        self.assertIn("[[broken (no close", result)
+        self.assertIn("first", result)
+        self.assertNotIn("[[first", result)
+        self.assertIn("second", result)
+        self.assertNotIn("[[second", result)
+        self.assertIn("third", result)
+        self.assertNotIn("[[third", result)
+
+    def test_unclosed_bracket_with_no_match_anywhere_does_not_affect_a_later_real_link(self):
+        # Note: this text happens to contain a blank line between the
+        # two parts, but that's not what makes it work -- "[[unclosed"
+        # has no matching "]]" anywhere in this text at all (not just
+        # within its own paragraph), so it's correctly identified as
+        # genuinely unclosed regardless of paragraph boundaries.
+        text = "First paragraph has [[unclosed (no close here\n\nSecond paragraph has [[a real link]] in it"
+        result = ex.replaceInternalLinks(text)
+        self.assertIn("[[unclosed", result)
+        self.assertIn("a real link", result)
+        self.assertNotIn("[[a real link", result)
+
+
+if __name__ == '__main__':
+    unittest.main()

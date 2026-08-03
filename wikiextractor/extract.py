@@ -21,16 +21,26 @@
 import re
 import html
 import json
+import ast
+import operator
 from itertools import zip_longest
 from urllib.parse import quote as urlencode
 from html.entities import name2codepoint
 import logging
 import time
 
+# Named separately from WikiExtractor.py's own 'wikiextractor.mapreduce'
+# logger: this one covers extraction mechanics specifically -- template
+# substitution, invocation, link processing -- gated by --debug, while
+# the mapreduce one covers pipeline coordination under
+# --debug_map_reduce. Named and configured independently so either can
+# be enabled without the other.
+logger = logging.getLogger('wikiextractor.extract')
+
 # ----------------------------------------------------------------------
 
 # match tail after wikilink
-tailRE = re.compile('\w+')
+tailRE = re.compile(r'\w+')
 syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlight&gt;', re.DOTALL)
 
 ## PARAMS ####################################################################
@@ -41,6 +51,22 @@ syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlig
 knownNamespaces = set(['Template'])
 
 ##
+# The #REDIRECT keyword, localized. MediaWiki's real redirect magic
+# word has a per-wiki-language translation (e.g. Sindhi uses "چوريو"
+# instead of "REDIRECT"), separate from the interface language --
+# matching only the English form meant a redirect page in a non-
+# English wiki wasn't recognized as a redirect at all, and its entire
+# (often stale, pre-redirect) body text got treated as real content.
+#
+# Extensible: add further confirmed, per-language keywords here as
+# they turn up on other wikis, rather than guessing translations
+# preemptively for languages not yet actually encountered.
+redirectKeywords = ['REDIRECT', 'چوريو']
+redirectRE = re.compile(
+    r'#(?:%s)\b.*?\[\[([^\]]*)]]' % '|'.join(redirectKeywords),
+    re.IGNORECASE)
+
+##
 # Drop these elements from article text
 #
 discardElements = [
@@ -48,7 +74,8 @@ discardElements = [
     'table', 'tr', 'td', 'th', 'caption', 'div',
     'form', 'input', 'select', 'option', 'textarea',
     'ul', 'li', 'ol', 'dl', 'dt', 'dd', 'menu', 'dir',
-    'ref', 'references', 'img', 'imagemap', 'source', 'small'
+    'ref', 'references', 'img', 'imagemap', 'source', 'small',
+    'inputbox'
 ]
 
 ##
@@ -125,6 +152,27 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
 
     # Collect spans
 
+    # br/hr carry genuine line-break semantics: unlike a comment or a
+    # citation marker, deleting one with nothing in its place can
+    # merge two adjacent words together if there was no surrounding
+    # whitespace in the source. Substitute with a space, but only
+    # where there's actually something to merge with on both sides --
+    # a tag at the very start/end of a line needs no separator, since
+    # adding one there just clutters every diff against that line.
+    #
+    # This MUST run before any of the span-collecting steps below:
+    # substituteLineBreakTag() changes text's length, so any span
+    # collected beforehand (comments, self-closing tags, ignored tags)
+    # would hold stale positions once dropSpans() later runs against
+    # the shifted text.
+    for pattern in lineBreak_tag_patterns:
+        text = substituteLineBreakTag(pattern, text)
+
+    # Same must-run-before-span-collection reasoning as above: this
+    # also mutates text's length.
+    for pattern in block_separator_tag_patterns:
+        text = substituteLineBreakTag(pattern, text, separator='\n')
+
     spans = []
     # Drop HTML comments
     for m in comment.finditer(text):
@@ -147,7 +195,48 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
 
     # Drop discarded elements
     for tag in discardElements:
-        text = dropNested(text, r'<\s*%s\b[^>/]*>' % tag, r'<\s*/\s*%s>' % tag)
+        close_pattern = r'<\s*/\s*%s\s*>' % tag
+        # [^>]*(?<!/) rather than [^>/]*: attribute values can
+        # legitimately contain a literal '/' (e.g. a ref name like
+        # "geo/18aug2018-1"), so only a '/' immediately before the
+        # final '>' is excluded -- that's a genuine self-closing tag
+        # (already handled separately by selfClosing_tag_patterns
+        # above), not a wrapping open for discardElements to pair up.
+        # (?=(...))\1 emulates an atomic/possessive match for the
+        # quoted alternatives (see lineBreak_tag_patterns above) --
+        # needed here specifically because without it, the (?<!/)
+        # exclusion can force a backtrack that falls back to plain
+        # [^>] matching, wrongly ending at a quoted value's own inner
+        # '>' instead of correctly failing to match a genuine self-
+        # closing tag like <ref style="a > b" />.
+        text = dropNested(text, r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*(?<!/)>''' % tag,
+                           close_pattern)
+        # dropNested only removes a close tag as part of a matched
+        # pair -- an unpaired one (its own open consumed or malformed
+        # elsewhere) is left untouched by its pairing logic. So
+        # anything still matching close_pattern at this point is
+        # genuinely orphaned -- same "strip the stray tag" approach as
+        # the noinclude handling below.
+        text = re.sub(close_pattern, '', text, flags=re.IGNORECASE)
+
+    # Any <noinclude>/</noinclude> still remaining at this point is
+    # genuinely unmatched within this page's own text -- a properly
+    # paired instance would already have been removed, tags and
+    # content together, by the loop above. noinclude is a
+    # template-specific construct; its most likely source in a
+    # REGULAR article (not a template page) is misplaced markup a
+    # human editor accidentally copy-pasted directly from a template,
+    # sometimes with the closing tag appearing BEFORE its "opening"
+    # counterpart -- structurally out of order, so they can never be
+    # matched to each other as a pair at all, no matter how the
+    # matching logic works. Rather than guess at what content was
+    # "supposed" to be wrapped (which the malformed, out-of-order
+    # source gives no reliable way to determine), just strip the
+    # literal tag text and leave everything else untouched --
+    # eliminates the visible raw-markup clutter without risking
+    # discarding real article content on a guess.
+    text = re.sub(r'<\s*noinclude\s*/?\s*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<\s*/\s*noinclude\s*>', '', text, flags=re.IGNORECASE)
 
     if not extractor.HtmlFormatting:
         # Turn into text what is left (&amp;nbsp;) and <syntaxhighlight>
@@ -168,8 +257,8 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     text = text.replace('\t', ' ')
     text = spaces.sub(' ', text)
     text = dots.sub('...', text)
-    text = re.sub(u' (,:\.\)\]»)', r'\1', text)
-    text = re.sub(u'(\[\(«) ', r'\1', text)
+    text = re.sub(r' (,:\.\)\]»)', r'\1', text)
+    text = re.sub(r'(\[\(«) ', r'\1', text)
     text = re.sub(r'\n\W+?\n', '\n', text, flags=re.U)  # lines with only punctuations
     text = text.replace(',,', ',').replace(',.', '.')
     if html_safe:
@@ -199,7 +288,12 @@ def compact(text, mark_headers=False):
     for line in text.split('\n'):
 
         if not line:
+            if len(listLevel):    # implies Extractor.HtmlFormatting
+                for c in reversed(listLevel):
+                    page.append(listClose[c])
+                    listLevel = ''
             continue
+
         # Handle section titles
         m = section.match(line)
         if m:
@@ -227,36 +321,35 @@ def compact(text, mark_headers=False):
                 page.append(title)
         # handle indents
         elif line[0] == ':':
-            # page.append(line.lstrip(':*#;'))
-            continue
+            page.append(line.lstrip(':'))
         # handle lists
-        elif line[0] in '*#;:':
+        # @see https://www.mediawiki.org/wiki/Help:Formatting
+        elif line[0] in '*#;':
             if Extractor.HtmlFormatting:
-                i = 0
-                for c, n in zip_longest(listLevel, line, fillvalue=''):
-                    if not n or n not in '*#;:':
-                        if c:
-                            page.append(listClose[c])
-                            listLevel = listLevel[:-1]
-                            continue
-                        else:
-                            break
-                    # n != ''
-                    if c != n and (not c or (c not in ';:' and n not in ';:')):
-                        if c:
-                            # close level
-                            page.append(listClose[c])
-                            listLevel = listLevel[:-1]
-                        listLevel += n
-                        page.append(listOpen[n])
-                    i += 1
-                n = line[i - 1]  # last list char
-                line = line[i:].strip()
-                if line:  # FIXME: n is '"'
-                    page.append(listItem[n] % line)
+                # close extra levels
+                l = 0
+                for c in listLevel:
+                    if l < len(line) and c != line[l]:
+                        for extra in reversed(listLevel[l:]):
+                            page.append(listClose[extra])
+                        listLevel = listLevel[:l]
+                        break
+                    l += 1
+                if l < len(line) and line[l] in '*#;:':
+                    # add new level (only one, no jumps)
+                    # FIXME: handle jumping levels
+                    type = line[l]
+                    page.append(listOpen[type])
+                    listLevel += type
+                    line = line[l+1:].strip()
+                else:
+                    # continue on same level
+                    type = line[l-1]
+                    line = line[l:].strip()
+                page.append(listItem[type] % line)
             else:
                 continue
-        elif len(listLevel):
+        elif len(listLevel):    # implies Extractor.HtmlFormatting
             for c in reversed(listLevel):
                 page.append(listClose[c])
             listLevel = []
@@ -376,11 +469,11 @@ wgUrlProtocols = [
 # as well as U+3000 is IDEOGRAPHIC SPACE for bug 19052
 EXT_LINK_URL_CLASS = r'[^][<>"\x00-\x20\x7F\s]'
 ExtLinkBracketedRegex = re.compile(
-    '\[(((?i)' + '|'.join(wgUrlProtocols) + ')' + EXT_LINK_URL_CLASS + r'+)\s*([^\]\x00-\x08\x0a-\x1F]*?)\]',
+    r'(?i)\[((' + '|'.join(wgUrlProtocols) + ')' + EXT_LINK_URL_CLASS + r'+)\s*([^\]\x00-\x08\x0a-\x1F]*?)\]',
     re.S | re.U)
 EXT_IMAGE_REGEX = re.compile(
-    r"""^(http://|https://)([^][<>"\x00-\x20\x7F\s]+)
-    /([A-Za-z0-9_.,~%\-+&;#*?!=()@\x80-\xFF]+)\.((?i)gif|png|jpg|jpeg)$""",
+    r"""(?i)^(http://|https://)([^][<>"\x00-\x20\x7F\s]+)
+    /([A-Za-z0-9_.,~%\-+&;#*?!=()@\x80-\xFF]+)\.(gif|png|jpg|jpeg)$""",
     re.X | re.S | re.U)
 
 
@@ -440,6 +533,260 @@ def makeExternalImage(url, alt=''):
 # Also: [[Help:IPA for Catalan|[andora]]]
 
 
+def collapseDoubledLinkBrackets(text):
+    """
+    Collapse a real, surprisingly common wikitext authoring mistake:
+    doubled link brackets, e.g. [[[[title]]]] instead of [[title]].
+    Found at meaningful scale on multiple language wikis -- sometimes
+    as an isolated typo, sometimes baked into a widely-transcluded
+    template (e.g. a sister-projects/interwiki table), in which case a
+    single buggy template can produce very many instances.
+
+    A valid link target can never legitimately start with "[[" as its
+    own first two characters, so a run of 3+ opening brackets is never
+    genuine nesting -- only ever this mistake. Three distinct cases:
+
+    1. The closing side has a matching excess immediately after the
+       first natural close (the common case: someone doubled the whole
+       [[...]] wrapper symmetrically) -- both sides are stripped and
+       the result is fully clean with no residue.
+
+    2. No natural close is found at all anywhere in the rest of the
+       text (an asymmetric mistake: fewer closing brackets than opens,
+       e.g. the real Sindhi Wikipedia "[[[[يوني ايئر(Uni Air)]]" case:
+       4 opens, only 2 closes). Collapsing just the opening side is
+       safe here and comes out fully clean, since there's nothing else
+       to strand.
+
+    3. A natural close IS found, but nothing extra immediately follows
+       it -- there's some other, different structure in between
+       before wherever a true excess (if any) actually sits, e.g. the
+       real Saraiki Wikipedia case [[[[سرائیکی]] زبان|سرائیکی]] (the
+       true outer close is on the far side of a whole separate
+       "زبان|..." phrase, not immediately after the first inner
+       close). This is the one case where this function does NOT
+       modify anything, leaving the run entirely untouched instead of
+       collapsing just the opens. Collapsing just the opens here would
+       be unsafe: findBalanced() on the original, fully-unmodified
+       text already matches the whole (globally-balanced) span as one
+       piece, and when a pipe happens to hide embedded garbage behind
+       a clean label, that already produces correct output on its own
+       -- but collapsing just the opens would make the first inner
+       closing pair look like a complete, separate match, ending too
+       early and stranding everything after it as newly-visible
+       leftover text that was never visible before. Leaving it
+       untouched means this function can only ever improve on the
+       unmodified behavior, never make a previously-correct case
+       worse -- at the cost of not attempting to also recover the
+       individual real links in more complex versions of this shape
+       (e.g. a doubled wrapper around several separate real links),
+       which remain exactly as findBalanced() would have handled them
+       without this function at all.
+
+    Deliberately does not touch the closing side on its own: adjacent
+    closing brackets legitimately occur in real nesting, e.g.
+    [[File:x.jpg|[[real link]]]] where a nested real link is the last
+    thing before the outer link's own close.
+    """
+    # Fast path: the vast majority of documents contain no run of 3+
+    # consecutive opening brackets at all (measured: a small fraction
+    # of articles even on the wikis where this pattern shows up).
+    # "[[[" appearing as a substring is exactly equivalent to "a run of
+    # 3+ consecutive '[' exists somewhere" (if such a run exists, its
+    # first 3 characters are that substring; if that substring exists,
+    # those are 3 consecutive '[' by definition) -- so this is a fully
+    # safe, exact short-circuit, not an approximation, and lets the
+    # (relatively expensive) per-character scan below be skipped
+    # entirely for documents that don't need it.
+    if '[[[' not in text:
+        return text
+
+    result = []
+    cur = 0
+    n = len(text)
+    pos = 0
+    while True:
+        m = _tripleOpenRE.search(text, pos)
+        if not m:
+            break
+        i, j = m.start(), m.end()
+        if i < cur:
+            # This run sits inside content already emitted as part of
+            # a previous occurrence's processed output (e.g. a nested
+            # run inside a caption we already consumed) -- skip it
+            # rather than reprocessing already-handled text.
+            pos = cur
+            continue
+        result.append(text[cur:i])
+        open_run = j - i
+        excess = open_run - 2
+        # Find where a normal, correctly-nested single link
+        # starting at position j would naturally close, using
+        # findBalanced() itself rather than a naive first-']]'
+        # scan -- this correctly skips over any genuinely
+        # nested real link in between (e.g. a File: link whose
+        # caption itself contains an actual [[link]]), rather
+        # than mistaking that inner link's own close for the
+        # outer one's.
+        #
+        # text[j-2:j] is already "[[" (the last two characters
+        # of the run of 3+ opens we just matched), so slicing
+        # from j-2 gives the same "starts with [[" property as
+        # concatenating a synthetic '[[' prefix onto text[j:]
+        # would, but as a single slice rather than a second
+        # string-building step.
+        pseudo = text[j - 2:]
+        match = next(findBalanced(pseudo, _LINK_OPEN_DELIM, _LINK_CLOSE_DELIM), None)
+        if match is not None:
+            _, pseudo_end = match
+            close_pos = j + (pseudo_end - 2) - 2
+            k = close_pos + 2
+            trailing_closes = 0
+            while k < n and text[k] == ']' and trailing_closes < excess:
+                trailing_closes += 1
+                k += 1
+            if trailing_closes == excess:
+                result.append('[[')
+                result.append(text[j:close_pos + 2])
+                cur = close_pos + 2 + excess
+                pos = cur
+                continue
+            if close_pos + 2 == n:
+                # The found natural close is the very last thing in
+                # the text -- nothing follows it at all, e.g. the real
+                # Sindhi Wikipedia "[[[[يوني ايئر(Uni Air)]]" case: 4
+                # opens, only 2 closes, and the found close ends
+                # exactly at the end of the text. Collapsing just the
+                # opens is safe here: there's nothing left afterward
+                # that could be stranded.
+                result.append('[[')
+                cur = j
+                pos = j
+                continue
+            # A natural close WAS found here, but nothing extra
+            # immediately follows it, AND there's still more text
+            # after it -- some other, different structure exists in
+            # between before wherever a true excess (if any) actually
+            # sits, e.g. the real Saraiki Wikipedia case
+            # [[[[سرائیکی]] زبان|سرائیکی]] (the true outer close is on
+            # the far side of a whole separate "زبان|..." phrase, not
+            # immediately after the first inner close). Collapsing
+            # just the opens here is unsafe: it can turn a case that
+            # was ACCIDENTALLY working correctly on the original,
+            # fully-unmodified text into something worse. findBalanced()
+            # on the original text would match the whole (globally-
+            # balanced) span as one piece, and if a pipe happens to
+            # hide embedded garbage behind a clean label, that already
+            # produces correct output -- but collapsing just the opens
+            # makes the first inner closing pair look like a complete,
+            # separate match on its own, ending too early and
+            # stranding everything after it as newly-visible leftover
+            # text that was never visible before. Leave this run
+            # completely untouched instead, and defer entirely to what
+            # findBalanced() would already do.
+            result.append(text[i:j])
+            cur = j
+            pos = j
+            continue
+        # No natural close found at all anywhere in the rest of the
+        # text. Collapsing just the opens is safe here too, for the
+        # same reason as the "nothing follows" case above: there's
+        # nothing left afterward that could be stranded.
+        result.append('[[')
+        cur = j
+        pos = j
+    result.append(text[cur:])
+    return ''.join(result)
+
+
+_bracketPairRE = re.compile(r'\[\[|\]\]')
+_tripleOpenRE = re.compile(r'\[{3,}')
+
+# Reused by collapseDoubledLinkBrackets()'s pseudo-prefix findBalanced()
+# call below -- allocated once at module load rather than as fresh list
+# objects on every call.
+_LINK_OPEN_DELIM = ['[[']
+_LINK_CLOSE_DELIM = [']]']
+
+
+def findUnclosedLinkOpenPositions(text):
+    """
+    Return the character positions of "[[" occurrences that never find
+    a matching "]]" within the given text, using simple stack logic
+    that mirrors findBalanced()'s own semantics (an opening delimiter
+    that's still on the stack once the text ends never gets yielded as
+    part of any match).
+
+    Implemented via a single compiled-regex scan (finditer) rather than
+    a manual character-by-character loop: measured ~9x faster on
+    realistic article-length text with identical results, since regex
+    scanning runs as compiled code rather than interpreted per-
+    character indexing.
+    """
+    stack = []
+    for m in _bracketPairRE.finditer(text):
+        if m.group() == '[[':
+            stack.append(m.start())
+        elif stack:
+            stack.pop()
+    return stack
+
+
+def neutralizeUnclosedLinkOpens(text):
+    """
+    A single genuinely unclosed link opening -- e.g. [[1198 (a real,
+    very ordinary wikitext typo: someone forgot the closing "]]") --
+    would otherwise silently disable ALL SUBSEQUENT link conversion for
+    the rest of the article. This happens because findBalanced()'s
+    stack-based matcher only yields a match once the stack returns to
+    completely empty; one permanently-unmatched opening means the
+    stack can never empty again for anything that follows, even
+    several unrelated, perfectly well-formed links later in the same
+    article.
+
+    This neutralizes exactly the genuinely-unclosed openings (found via
+    findUnclosedLinkOpenPositions(), not merely "the first N excess
+    opens" -- a naive count-based heuristic could misidentify an
+    earlier, properly-closed link as the broken one) by temporarily
+    replacing them with a placeholder that findBalanced() won't
+    recognize as an opening delimiter. The placeholder is restored back
+    to a literal "[[" afterward, so the malformed link itself is left
+    exactly as broken as it was -- only its blast radius on later,
+    unrelated links is contained.
+
+    Deliberately NOT bounded to a single paragraph: findBalanced() and
+    findUnclosedLinkOpenPositions() use the exact same LIFO stack
+    logic, so this never "blames" a bracket that findBalanced() itself
+    wouldn't already treat the same way on the raw, uncollapsed text --
+    it only prevents one permanently-unmatched opening from poisoning
+    everything after it. Paragraph-bounding was tried first, but
+    causes a worse problem: a File: link whose citation/caption
+    content spans a blank line (legitimate, if untidy, wikitext) gets
+    its true closing "]]" treated as out of reach, so the whole link
+    survives as literal text instead of being dropped normally.
+    Whole-text detection avoids this, since the true close is still
+    found and paired the same way findBalanced() would pair it anyway.
+    """
+    unclosed = findUnclosedLinkOpenPositions(text)
+    if not unclosed:
+        return text
+    result = []
+    cur = 0
+    for pos in unclosed:
+        result.append(text[cur:pos])
+        result.append(LINK_OPEN_PLACEHOLDER)
+        cur = pos + 2
+    result.append(text[cur:])
+    return ''.join(result)
+
+
+# Placeholder used by neutralizeUnclosedLinkOpens(); chosen to be a
+# control-character sequence that can never legitimately appear in
+# wikitext, and restored back to a literal "[[" once link processing
+# for the rest of the text has completed.
+LINK_OPEN_PLACEHOLDER = '\x00\x00'
+
+
 def replaceInternalLinks(text):
     """
     Replaces external links of the form:
@@ -449,6 +796,9 @@ def replaceInternalLinks(text):
     """
     # call this after removal of external links, so we need not worry about
     # triple closing ]]].
+    text = collapseDoubledLinkBrackets(text)
+    text = neutralizeUnclosedLinkOpens(text)
+
     cur = 0
     res = ''
     for s, e in findBalanced(text, ['[['], [']]']):
@@ -477,7 +827,7 @@ def replaceInternalLinks(text):
             label = inner[pipe + 1:].strip()
         res += text[cur:s] + makeInternalLink(title, label) + trail
         cur = end
-    return res + text[cur:]
+    return (res + text[cur:]).replace(LINK_OPEN_PLACEHOLDER, '[[')
 
 
 def makeInternalLink(title, label):
@@ -613,7 +963,8 @@ class MagicWords():
         '__INDEX__',
         '__NOINDEX__',
         '__STATICREDIRECT__',
-        '__DISAMBIG__'
+        '__DISAMBIG__',
+        '__NOEDITSECTION__',
     )
 
 
@@ -656,14 +1007,39 @@ magicWordsRE = re.compile('|'.join(MagicWords.switches))
 
 # ------------------------------------------------------------------------------
 
-selfClosingTags = ('br', 'hr', 'nobr', 'ref', 'references', 'nowiki')
+lineBreakTags = ('br', 'hr')
+selfClosingTags = ('nobr', 'ref', 'references', 'nowiki', 'templatestyles', 'section')
+
+# Block-level by default HTML semantics (a real browser renders an
+# implicit line break around each of these), unlike the rest of
+# ignoredTags below, which are genuinely inline (span, b, i, etc. --
+# no implied break at all). Stripped the same tag-syntax-removed,
+# content-kept way, but via a newline substitution (see
+# substituteLineBreakTag()) rather than plain deletion -- otherwise
+# two adjacent blocks with no whitespace between them in the source
+# fuse into one run-on string, the same class of bug as the br/hr
+# word-merging fix, just for a different set of tags. A newline
+# specifically (not just a space) to match how compact() already
+# treats section/paragraph boundaries elsewhere in this file: wikitext
+# "==heading==" is only recognized when it's on its own line
+# (section.match(line), applied line-by-line via text.split('\n')) --
+# an HTML heading should end up the same way, as its own line, not
+# merged onto the same line as surrounding prose.
+#
+# div is deliberately NOT included here yet, despite also being
+# block-level: it's registered in BOTH ignoredTags and
+# discardElements (see the comment there), and working out how that
+# interacts with a newline-substitution step is a separate piece of
+# work. blockquote isn't included either, out of the same deliberate,
+# narrow scope -- just p, center, and the headers for now.
+blockSeparatorTags = ('p', 'center', 'h1', 'h2', 'h3', 'h4')
 
 # These tags are dropped, keeping their content.
 # handle 'a' separately, depending on keepLinks
 ignoredTags = (
-    'abbr', 'b', 'big', 'blockquote', 'center', 'cite', 'div', 'em',
-    'font', 'h1', 'h2', 'h3', 'h4', 'hiero', 'i', 'kbd', 'nowiki',
-    'p', 'plaintext', 's', 'span', 'strike', 'strong',
+    'abbr', 'b', 'bdi', 'big', 'blockquote', 'cite', 'div', 'em',
+    'font', 'hiero', 'i', 'kbd', 'nowiki',
+    'plaintext', 'poem', 's', 'section', 'span', 'strike', 'strong',
     'sub', 'sup', 'tt', 'u', 'var'
 )
 
@@ -730,7 +1106,7 @@ def unescape(text):
         except:
             return text  # leave as is
 
-    return re.sub("&#?(\w+);", fixup, text)
+    return re.sub(r"&#?(\w+);", fixup, text)
 
 
 # Match HTML comments
@@ -743,7 +1119,7 @@ ignored_tag_patterns = []
 
 def ignoreTag(tag):
     left = re.compile(r'<%s\b.*?>' % tag, re.IGNORECASE | re.DOTALL)  # both <ref> and <reference>
-    right = re.compile(r'</\s*%s>' % tag, re.IGNORECASE)
+    right = re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE)  # space allowed, such as </span >
     ignored_tag_patterns.append((left, right))
 
 
@@ -757,8 +1133,119 @@ for tag in ignoredTags:
 
 # Match selfClosing HTML tags
 selfClosing_tag_patterns = [
-    re.compile(r'<\s*%s\b[^>]*/\s*>' % tag, re.DOTALL | re.IGNORECASE) for tag in selfClosingTags
+    # nobr is treated the same permissive way as br/hr (optional
+    # trailing slash) -- a bare, unclosed <nobr> is a stray tag like
+    # them, but "no line break" doesn't call for inserting a space
+    # where the tag was, so it stays here rather than moving to
+    # lineBreak_tag_patterns.
+    #
+    # ref/references/nowiki/templatestyles are NOT treated this way:
+    # for ref specifically, self-closing has a distinct, real meaning
+    # (<ref name="x" /> reuses an earlier-defined reference) from the
+    # paired form (<ref name="x">real citation text</ref>) -- making
+    # the slash optional would misidentify a real paired tag's opening
+    # as self-closing. templatestyles is always self-closing in real
+    # usage, so the strict pattern loses nothing there either.
+    # (?=(...))\1 emulates an atomic/possessive match for the quoted
+    # alternatives (see lineBreak_tag_patterns below) -- without it, a
+    # literal '>' inside a quoted attribute value (e.g.
+    # <ref style="a > b" />) would prevent matching at all, since
+    # [^>]* alone stops at that inner '>' and never finds the real,
+    # required trailing '/'.
+    re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*/?\s*>''' % tag if tag == 'nobr'
+               else r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*/\s*>''' % tag,
+               re.DOTALL | re.IGNORECASE)
+    for tag in selfClosingTags
 ]
+
+# br/hr carry genuine line-break semantics (see the substitution site
+# in clean() above): matched the same permissive way as nobr (trailing
+# slash optional, since old-style HTML4 syntax like <br clear=all> --
+# or even a bare <br> -- is just as valid a "line break" instance as
+# <br/>), but substituted with a space instead of bulk-deleted.
+lineBreak_tag_patterns = [
+    # (?=(...))\1 emulates an atomic/possessive match for the quoted
+    # alternatives, portably (works pre-3.11 too, unlike native atomic
+    # groups): once a quoted string is matched, the engine can never
+    # backtrack into re-interpreting its own quote characters as
+    # individual [^>] matches. Without it, a literal '>' inside a
+    # quoted attribute value (e.g. <br style="a > b" />, legal HTML --
+    # a quoted '>' doesn't end the tag) truncates the match early, at
+    # that inner '>', leaving the tag's own real ending stranded as
+    # literal text afterward.
+    re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*>''' % tag,
+               re.DOTALL | re.IGNORECASE)
+    for tag in lineBreakTags
+] + [
+    # br/hr are void elements -- a closing tag is invalid HTML, but a
+    # real, if malformed, editing mistake (someone writing </br> as if
+    # it needed a matching close, same instinct as XHTML-style
+    # self-closing syntax). No attributes are possible on a closing
+    # tag, so no quote-aware matching is needed here.
+    re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE)
+    for tag in lineBreakTags
+]
+
+# blockSeparatorTags (see the comment there) are substituted with a
+# newline rather than a space, via the same substituteLineBreakTag()
+# mechanism -- each tag contributes its own opening AND closing
+# pattern separately here, since (unlike br/hr, which are single,
+# self-closing tags) these have two distinct halves, each appearing at
+# a different position and needing its own independent substitution.
+# Same shapes as ignoreTag()'s own left/right patterns, for
+# consistency: opening requires the tag name immediately after '<',
+# matching real HTML tokenizer behavior (a bare '< p>' is not treated
+# as a tag at all by real parsers, so this shouldn't either); closing
+# tolerates whitespace on either side of the name.
+block_separator_tag_patterns = [
+    pattern
+    for tag in blockSeparatorTags
+    for pattern in (
+        re.compile(r'<%s\b.*?>' % tag, re.IGNORECASE | re.DOTALL),
+        re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE),
+    )
+]
+
+
+def substituteLineBreakTag(pattern, text, separator=' '):
+    """
+    Replace each match of a line-break-like tag pattern (br/hr, or a
+    blockSeparatorTags opening/closing half) with `separator`, EXCEPT
+    when the match sits at the very start/end of the text or is
+    already adjacent to whitespace (any kind -- space, tab, newline,
+    non-breaking space -- not just newline specifically) on one side
+    -- in that case, omit the separator on that side entirely, since
+    there's already something separating it from whatever's there, or
+    nothing at all to separate it from. Checking for any whitespace
+    rather than just the specific separator character matters:
+    without it, this function can produce a doubled-up separator on
+    its own when the source already had one adjacent to the tag
+    (verified directly for the space case), and isn't otherwise
+    self-sufficient -- relying on some other, unrelated part of the
+    pipeline to clean up after it is fragile compared to just not
+    creating the extra separator to begin with.
+
+    Verified this doesn't over-match invisible RTL-script formatting
+    characters that aren't real separators (e.g. zero-width
+    non-joiner/joiner, the Arabic letter mark, all common in the
+    Perso-Arabic-script wikis this project works with) -- Python's
+    str.isspace() correctly excludes those while still recognizing a
+    non-breaking space as a genuine (if non-wrapping) separator.
+    """
+    result = []
+    cur = 0
+    n = len(text)
+    for m in pattern.finditer(text):
+        if m.start() < cur:
+            continue  # overlapping match already consumed
+        result.append(text[cur:m.start()])
+        before_is_boundary = (m.start() == 0) or text[m.start() - 1].isspace()
+        after_is_boundary = (m.end() == n) or text[m.end()].isspace()
+        if not (before_is_boundary or after_is_boundary):
+            result.append(separator)
+        cur = m.end()
+    result.append(text[cur:])
+    return ''.join(result)
 
 # Match HTML placeholder tags
 placeholder_tag_patterns = [
@@ -788,6 +1275,114 @@ dots = re.compile(r'\.{4,}')
 
 # ======================================================================
 
+class Template(list):
+    """
+    A Template is a list of TemplateText or TemplateArgs
+    """
+
+    @classmethod
+    def parse(cls, body):
+        tpl = Template()
+        # we must handle nesting, s.a.
+        # {{{1|{{PAGENAME}}}
+        # {{{italics|{{{italic|}}}
+        # {{#if:{{{{{#if:{{{nominee|}}}|nominee|candidate}}|}}}|
+        #
+        start = 0
+        for s,e in findMatchingBraces(body, 3):
+            tpl.append(TemplateText(body[start:s]))
+            tpl.append(TemplateArg(body[s+3:e-3]))
+            start = e
+        tpl.append(TemplateText(body[start:])) # leftover
+        return tpl
+
+    def subst(self, params, extractor, depth=0):
+        # We perform parameter substitutions recursively.
+        # We also limit the maximum number of iterations to avoid too long or
+        # even endless loops (in case of malformed input).
+
+        # :see: http://meta.wikimedia.org/wiki/Help:Expansion#Distinction_between_variables.2C_parser_functions.2C_and_templates
+        #
+        # Parameter values are assigned to parameters in two (?) passes.
+        # Therefore a parameter name in a template can depend on the value of
+        # another parameter of the same template, regardless of the order in
+        # which they are specified in the template call, for example, using
+        # Template:ppp containing "{{{{{{p}}}}}}", {{ppp|p=q|q=r}} and even
+        # {{ppp|q=r|p=q}} gives r, but using Template:tvvv containing
+        # "{{{{{{{{{p}}}}}}}}}", {{tvvv|p=q|q=r|r=s}} gives s.
+
+        logger.debug('subst tpl (%d, %d) %s', len(extractor.frame), depth, self)
+
+        if depth > extractor.maxParameterRecursionLevels:
+            extractor.recursion_exceeded_3_errs += 1
+            return ''
+
+        return ''.join([tpl.subst(params, extractor, depth) for tpl in self])
+
+    def __str__(self):
+        return ''.join([str(x) for x in self])
+
+
+class TemplateText(str):
+    """Fixed text of template"""
+
+    def subst(self, params, extractor, depth):
+        return self
+
+
+class TemplateArg():
+    """
+    parameter to a template.
+    Has a name and a default value, both of which are Templates.
+    """
+    def __init__(self, parameter):
+        """
+        :param parameter: the parts of a tplarg.
+        """
+        # the parameter name itself might contain templates, e.g.:
+        #   appointe{{#if:{{{appointer14|}}}|r|d}}14|
+        #   4|{{{{{subst|}}}CURRENTYEAR}}
+
+        # any parts in a tplarg after the first (the parameter default) are
+        # ignored, and an equals sign in the first part is treated as plain text.
+        #logger.debug('TemplateArg %s', parameter)
+
+        parts = splitParts(parameter)
+        self.name = Template.parse(parts[0])
+        if len(parts) > 1:
+            # This parameter has a default value
+            self.default = Template.parse(parts[1])
+        else:
+            self.default = None
+
+    def __str__(self):
+        if self.default:
+            return '{{{%s|%s}}}' % (self.name, self.default)
+        else:
+            return '{{{%s}}}' % self.name
+
+    def subst(self, params, extractor, depth):
+        """
+        Substitute value for this argument from dict :param params:
+        Use :param extractor: to evaluate expressions for name and default.
+        Limit substitution to the maximun :param depth:.
+        """
+        # the parameter name itself might contain templates, e.g.:
+        # appointe{{#if:{{{appointer14|}}}|r|d}}14|
+        paramName = self.name.subst(params, extractor, depth+1)
+        paramName = extractor.expandTemplates(paramName)
+        res = ''
+        if paramName in params:
+            res = params[paramName]  # use parameter value specified in template invocation
+        elif self.default:            # use the default value
+            defaultValue = self.default.subst(params, extractor, depth+1)
+            res =  extractor.expandTemplates(defaultValue)
+        #logger.debug('subst arg %d %s -> %s' % (depth, paramName, res))
+        return res
+
+
+# ======================================================================
+
 substWords = 'subst:|safesubst:'
 
 
@@ -809,7 +1404,17 @@ class Extractor():
 
     ##
     # Whether to produce json instead of the default <doc> output format.
-    toJson = False
+    to_json = False
+    # Whether to produce text instead of the default <doc> output format.
+    to_text = False
+
+    ##
+    # Whether or not to discard empty (title only) documents
+    discard_empty = False
+
+    ##
+    # Obtained from TemplateNamespace
+    templatePrefix = ''
 
     def __init__(self, id, revid, urlbase, title, page):
         """
@@ -826,13 +1431,17 @@ class Extractor():
         self.recursion_exceeded_2_errs = 0  # template recursion within expandTemplate()
         self.recursion_exceeded_3_errs = 0  # parameter recursion
         self.template_title_errs = 0
+        self.template_loop_errs = 0  # same (title, params) reappearing in its own expansion chain
+        self.warned_loop_keys = set()  # (id, title) pairs already warned about, to avoid log spam
 
-    def clean_text(self, text, mark_headers=False, expand_templates=False,
+    def clean_text(self, text, mark_headers=False, expand_templates=True,
                    html_safe=True):
         """
         :param mark_headers: True to distinguish headers from paragraphs
           e.g. "## Section 1"
         """
+        self.magicWords['namespace'] = self.title[:max(0, self.title.find(":"))]
+        #self.magicWords['namespacenumber'] = '0' # for article, 
         self.magicWords['pagename'] = self.title
         self.magicWords['fullpagename'] = self.title
         self.magicWords['currentyear'] = time.strftime('%Y')
@@ -852,11 +1461,13 @@ class Extractor():
         :param out: a memory file.
         :param html_safe: whether to escape HTML entities.
         """
-        logging.debug("%s\t%s", self.id, self.title)
+        logger.debug("%s\t%s", self.id, self.title)
         text = ''.join(self.page)
         text = self.clean_text(text, html_safe=html_safe)
 
-        if self.to_json:
+        if self.discard_empty and not any(t.strip() for t in text):
+            pass
+        elif self.to_json:
             json_data = {
 		'id': self.id,
                 'revid': self.revid,
@@ -867,6 +1478,9 @@ class Extractor():
             out_str = json.dumps(json_data)
             out.write(out_str)
             out.write('\n')
+        elif self.to_text:
+            out.write('\n'.join(text))
+            out.write('\n\n\n')
         else:
             header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, self.url, self.title)
             # Separate header from text with a newline.
@@ -880,19 +1494,20 @@ class Extractor():
         errs = (self.template_title_errs,
                 self.recursion_exceeded_1_errs,
                 self.recursion_exceeded_2_errs,
-                self.recursion_exceeded_3_errs)
+                self.recursion_exceeded_3_errs,
+                self.template_loop_errs)
         if any(errs):
-            logging.warn("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d)",
+            logger.warning("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d) loop(%d)",
                          self.title, self.id, *errs)
 
     # ----------------------------------------------------------------------
     # Expand templates
 
     maxTemplateRecursionLevels = 30
-    maxParameterRecursionLevels = 10
+    maxParameterRecursionLevels = 16
 
     # check for template beginning
-    reOpen = re.compile('(?<!{){{(?!{)', re.DOTALL)
+    reOpen = re.compile(r'(?<!{){{(?!{)', re.DOTALL)
 
     def expandTemplates(self, wikitext):
         """
@@ -921,7 +1536,7 @@ class Extractor():
             self.recursion_exceeded_1_errs += 1
             return res
 
-        # logging.debug('<expandTemplates ' + str(len(self.frame)))
+        # logger.debug('<expandTemplates ' + str(len(self.frame)))
 
         cur = 0
         # look for matching {{...}}
@@ -930,7 +1545,7 @@ class Extractor():
             cur = e
         # leftover
         res += wikitext[cur:]
-        # logging.debug('   expandTemplates> %d %s', len(self.frame), res)
+        # logger.debug('   expandTemplates> %d %s', len(self.frame), res)
         return res
 
     def templateParams(self, parameters):
@@ -942,7 +1557,7 @@ class Extractor():
 
         if not parameters:
             return templateParams
-        logging.debug('<templateParams: %s', '|'.join(parameters))
+        logger.debug('<templateParams: %s', '|'.join(parameters))
 
         # Parameters can be either named or unnamed. In the latter case, their
         # name is defined by their ordinal position (1, 2, 3, ...).
@@ -978,7 +1593,11 @@ class Extractor():
             # The '=' might occurr within an HTML attribute:
             #   "&lt;ref name=value"
             # but we stop at first.
-            m = re.match(' *([^=]*?) *=(.*)', param, re.DOTALL)
+
+            # The '=' might occurr within quotes:
+            # ''''<span lang="pt-pt" xml:lang="pt-pt">cénicas</span>'''
+
+            m = re.match(" *([^=']*?) *=(.*)", param, re.DOTALL)
             if m:
                 # This is a named parameter.  This case also handles parameter
                 # assignments like "2=xxx", where the number of an unnamed
@@ -998,7 +1617,7 @@ class Extractor():
                 if ']]' not in param:  # if the value does not contain a link, trim whitespace
                     param = param.strip()
                 templateParams[str(unnamedParameterCounter)] = param
-        logging.debug('   templateParams> %s', '|'.join(templateParams.values()))
+        logger.debug('   templateParams> %s', '|'.join(templateParams.values()))
         return templateParams
 
     def expandTemplate(self, body):
@@ -1048,14 +1667,14 @@ class Extractor():
 
         if len(self.frame) >= self.maxTemplateRecursionLevels:
             self.recursion_exceeded_2_errs += 1
-            # logging.debug('   INVOCATION> %d %s', len(self.frame), body)
+            # logger.debug('   INVOCATION> %d %s', len(self.frame), body)
             return ''
 
-        logging.debug('INVOCATION %d %s', len(self.frame), body)
+        logger.debug('INVOCATION %d %s', len(self.frame), body)
 
         parts = splitParts(body)
         # title is the portion before the first |
-        logging.debug('TITLE %s', parts[0].strip())
+        logger.debug('TITLE %s', parts[0].strip())
         title = self.expandTemplates(parts[0].strip())
 
         # SUBST
@@ -1103,7 +1722,7 @@ class Extractor():
             # The page being included could not be identified
             return ''
 
-        # logging.debug('TEMPLATE %s: %s', title, template)
+        # logger.debug('TEMPLATE %s: %s', title, template)
 
         # tplarg          = "{{{" parts "}}}"
         # parts           = [ title *( "|" part ) ]
@@ -1144,16 +1763,44 @@ class Extractor():
         # build a dict of name-values for the parameter values
         params = self.templateParams(params)
 
+        # Guard against template self-inclusion loops. We compare (title,
+        # params) rather than title alone: a template legitimately calling
+        # itself with *different* (e.g. progressively shrinking) parameters
+        # is a common, intentional MediaWiki idiom for iterating over a
+        # variable-length argument list (templates have no native loop
+        # construct) -- it makes real progress each step and terminates on
+        # its own, well within maxTemplateRecursionLevels. That must NOT be
+        # blocked. What we actually want to catch is the same title being
+        # invoked again with the *same* parameters as an active ancestor --
+        # that's genuine zero-progress recursion (e.g. a template whose
+        # /doc examples re-invoke it with fixed, hardcoded parameters),
+        # which can branch combinatorially and never terminates in practice.
+        # Real MediaWiki detects the analogous case ("Template loop
+        # detected: Template:X") and stops immediately; do the same here.
+        if any(frameTitle == title and frameParams == params
+               for frameTitle, frameParams in self.frame):
+            self.template_loop_errs += 1
+            loopKey = (self.id, title)
+            if loopKey not in self.warned_loop_keys:
+                self.warned_loop_keys.add(loopKey)
+                logger.warning("Template loop detected: %s (article %s, id %s) -- "
+                                 "leaving unexpanded (further repeats in this "
+                                 "article are counted but not logged)",
+                                 title, self.title, self.id)
+            return '{{' + body + '}}'
+
         # Perform parameter substitution
         # extend frame before subst, since there may be recursion in default
         # parameter value, e.g. {{OTRS|celebrative|date=April 2015}} in article
         # 21637542 in enwiki.
         self.frame.append((title, params))
-        instantiated = template.subst(params, self)
-        # logging.debug('instantiated %d %s', len(self.frame), instantiated)
-        value = self.expandTemplates(instantiated)
-        self.frame.pop()
-        # logging.debug('   INVOCATION> %s %d %s', title, len(self.frame), value)
+        try:
+            instantiated = template.subst(params, self)
+            # logger.debug('instantiated %d %s', len(self.frame), instantiated)
+            value = self.expandTemplates(instantiated)
+        finally:
+            self.frame.pop()
+        # logger.debug('   INVOCATION> %s %d %s', title, len(self.frame), value)
         return value
 
 
@@ -1229,7 +1876,7 @@ def splitParts(paramsList):
         else:
             parameters = par
 
-    # logging.debug('splitParts %s %s\nparams: %s', sep, paramsList, str(parameters))
+    # logger.debug('splitParts %s %s\nparams: %s', sep, paramsList, str(parameters))
     return parameters
 
 
@@ -1272,11 +1919,11 @@ def findMatchingBraces(text, ldelim=0):
     #   {{{link|{{ucfirst:{{{1}}}}}} interchange}}}
 
     if ldelim:  # 2-3
-        reOpen = re.compile('[{]{%d,}' % ldelim)  # at least ldelim
-        reNext = re.compile('[{]{2,}|}{2,}')  # at least 2
+        reOpen = re.compile(r'[{]{%d,}' % ldelim)  # at least ldelim
+        reNext = re.compile(r'[{]{2,}|}{2,}')  # at least 2 open or close bracces
     else:
-        reOpen = re.compile('{{2,}|\[{2,}')
-        reNext = re.compile('{{2,}|}{2,}|\[{2,}|]{2,}')  # at least 2
+        reOpen = re.compile(r'{{2,}|\[{2,}')
+        reNext = re.compile(r'{{2,}|}{2,}|\[{2,}|]{2,}')  # at least 2
 
     cur = 0
     while True:
@@ -1342,11 +1989,16 @@ def findMatchingBraces(text, ldelim=0):
                 cur = end
 
 
-def findBalanced(text, openDelim, closeDelim):
+def findBalanced(text, openDelim, closeDelim, search_start=0):
     """
     Assuming that text contains a properly balanced expression using
     :param openDelim: as opening delimiters and
     :param closeDelim: as closing delimiters.
+    :param search_start: character position to begin searching from
+      (default 0, i.e. the whole text). Useful for scanning from
+      partway through a large string without copying/slicing it first --
+      regex .search(text, pos) already supports an arbitrary start
+      position natively, without any copy.
     :return: an iterator producing pairs (start, end) of start and end
     positions in text containing a balanced expression.
     """
@@ -1355,7 +2007,7 @@ def findBalanced(text, openDelim, closeDelim):
     afterPat = {o: re.compile(openPat + '|' + c, re.DOTALL) for o, c in zip(openDelim, closeDelim)}
     stack = []
     start = 0
-    cur = 0
+    cur = search_start
     # end = len(text)
     startSet = False
     startPat = re.compile(openPat)
@@ -1420,7 +2072,7 @@ def fullyQualifiedTemplateTitle(templateTitle):
         # Leading colon by itself implies main namespace, so strip this colon
         return ucfirst(templateTitle[1:])
     else:
-        m = re.match('([^:]*)(:.*)', templateTitle)
+        m = re.match(r'([^:]*)(:.*)', templateTitle)
         if m:
             # colon found but not in the first position - check if it
             # designates a known namespace
@@ -1439,7 +2091,7 @@ def fullyQualifiedTemplateTitle(templateTitle):
     # space]], but having in the system a redirect page with an empty title
     # causes numerous problems, so we'll live happier without it.
     if templateTitle:
-        return templatePrefix + ucfirst(templateTitle)
+        return Extractor.templatePrefix + ucfirst(templateTitle)
     else:
         return ''  # caller may log as error
 
@@ -1454,43 +2106,129 @@ def normalizeNamespace(ns):
 # https://github.com/Wikia/app/blob/dev/extensions/ParserFunctions/ParserFunctions_body.php
 
 
-class Infix():
+# #expr's operators, mapped to their Python equivalents -- this is the
+# complete, explicit whitelist; nothing outside it is ever evaluated.
+_SHARP_EXPR_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_SHARP_EXPR_UNARYOPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+    ast.Not: lambda x: 0 if x else 1,
+}
+_SHARP_EXPR_COMPARISONS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+}
 
-    """Infix operators.
-    The calling sequence for the infix is:
-      x |op| y
+
+def _sharp_expr_eval_node(node):
     """
+    Recursively evaluates one node of a parsed #expr expression,
+    computing the result directly in Python rather than ever calling
+    eval()/exec()/compile() on the (untrusted, wikitext-derived)
+    expression text. Every node type reachable here is on an explicit
+    whitelist; anything else -- a function call, a name lookup, an
+    attribute access, a string, anything at all outside plain
+    numeric/boolean arithmetic -- raises ValueError and is treated as
+    a malformed expression, the same outcome #expr's real syntax
+    would produce for it anyway (it doesn't support any of those
+    either: see https://www.mediawiki.org/wiki/Help:Extension:ParserFunctions,
+    #expr operates on numbers and booleans only, never strings, and
+    has no facility for function calls or name references at all).
 
-    def __init__(self, function):
-        self.function = function
+    This must never be changed to route the expression text through
+    eval()/exec()/compile() in any form: #expr's input comes from
+    wikitext on openly-editable wikis, and any such path grants full
+    access to Python's builtins (including __import__) unless
+    explicit globals/locals are passed and carefully restricted --
+    easy to get wrong, so the whitelist-only approach here is
+    deliberate, not incidental.
 
-    def __ror__(self, other):
-        return Infix(lambda x, self=self, other=other: self.function(other, x))
+    Previously, an eval() call had full access to
+    Python's builtins, including __import__ -- e.g.
+    "{{#expr: __import__('os').system('rm -rf ...') }}"
+    would actually execute a shell command.
+    """
+    if isinstance(node, ast.Expression):
+        return _sharp_expr_eval_node(node.body)
 
-    def __or__(self, other):
-        return self.function(other)
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            return node.value
+        raise ValueError("only numeric constants are permitted in #expr")
 
-    def __rlshift__(self, other):
-        return Infix(lambda x, self=self, other=other: self.function(other, x))
+    if isinstance(node, ast.BinOp):
+        # "X round Y" gets pre-processed (see sharp_expr() below) into
+        # "X |ROUND| Y", which -- since | left-associates in Python --
+        # parses as (X | ROUND) | Y. Recognized specifically as this
+        # exact shape, rather than treating BitOr as a general-purpose
+        # operator (it isn't one in #expr's own grammar at all).
+        if (isinstance(node.op, ast.BitOr)
+                and isinstance(node.left, ast.BinOp)
+                and isinstance(node.left.op, ast.BitOr)
+                and isinstance(node.left.right, ast.Name)
+                and node.left.right.id == 'ROUND'):
+            value = _sharp_expr_eval_node(node.left.left)
+            digits = _sharp_expr_eval_node(node.right)
+            return round(value, int(digits))
+        op_func = _SHARP_EXPR_BINOPS.get(type(node.op))
+        if op_func is None:
+            raise ValueError(f"operator not permitted in #expr: {type(node.op).__name__}")
+        return op_func(_sharp_expr_eval_node(node.left), _sharp_expr_eval_node(node.right))
 
-    def __rshift__(self, other):
-        return self.function(other)
+    if isinstance(node, ast.UnaryOp):
+        op_func = _SHARP_EXPR_UNARYOPS.get(type(node.op))
+        if op_func is None:
+            raise ValueError(f"unary operator not permitted in #expr: {type(node.op).__name__}")
+        return op_func(_sharp_expr_eval_node(node.operand))
 
-    def __call__(self, value1, value2):
-        return self.function(value1, value2)
+    if isinstance(node, ast.Compare):
+        if len(node.ops) != 1:
+            raise ValueError("chained comparisons not supported in #expr")
+        op_func = _SHARP_EXPR_COMPARISONS.get(type(node.ops[0]))
+        if op_func is None:
+            raise ValueError(f"comparison not permitted in #expr: {type(node.ops[0]).__name__}")
+        result = op_func(_sharp_expr_eval_node(node.left),
+                         _sharp_expr_eval_node(node.comparators[0]))
+        return 1 if result else 0
 
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.And):
+            result = 1
+            for value_node in node.values:
+                result = _sharp_expr_eval_node(value_node)
+                if not result:
+                    return 0
+            return result
+        else:  # ast.Or
+            for value_node in node.values:
+                result = _sharp_expr_eval_node(value_node)
+                if result:
+                    return result
+            return 0
 
-ROUND = Infix(lambda x, y: round(x, y))
+    raise ValueError(f"disallowed #expr element: {type(node).__name__}")
 
 
 def sharp_expr(expr):
     try:
         expr = re.sub('=', '==', expr)
         expr = re.sub('mod', '%', expr)
-        expr = re.sub('\bdiv\b', '/', expr)
-        expr = re.sub('\bround\b', '|ROUND|', expr)
-        return unicode(eval(expr))
-    except:
+        expr = re.sub(r'\bdiv\b', '/', expr)
+        expr = re.sub(r'\bround\b', '|ROUND|', expr)
+        tree = ast.parse(expr, mode='eval')
+        return str(_sharp_expr_eval_node(tree))
+    except Exception:
         return '<span class="error"></span>'
 
 
@@ -1527,7 +2265,7 @@ def sharp_ifeq(lvalue, rvalue, valueIfTrue, valueIfFalse=None, *args):
 
 
 def sharp_iferror(test, then='', Else=None, *args):
-    if re.match('<(?:strong|span|p|div)\s(?:[^\s>]*\s+)*?class="(?:[^"\s>]*\s+)*?error(?:\s[^">]*)?"', test):
+    if re.match(r'<(?:strong|span|p|div)\s(?:[^\s>]*\s+)*?class="(?:[^"\s>]*\s+)*?error(?:\s[^">]*)?"', test):
         return then
     elif Else is None:
         return test.strip()
@@ -1580,19 +2318,38 @@ def sharp_switch(primary, *params):
 
 
 # Extension Scribuntu
+# Only minimal support for Lua modules invoked via #invoke.
+# FIXME: import real Lua modules (would require a Lua interpreter,
+# which this project doesn't have).
+#
+# Must stay defined in this module, not a caller's -- sharp_invoke()
+# below reads this as a global, and Python resolves that against the
+# function's own defining module, not wherever it's called from.
+modules = {
+    'convert': {
+        'convert': lambda x, u, *rest: x + ' ' + u,  # no conversion
+    }
+}
+
+
 def sharp_invoke(module, function, frame):
     functions = modules.get(module)
     if functions:
         funct = functions.get(function)
         if funct:
-            # find parameters in frame whose title is the one of the original
-            # template invocation
-            templateTitle = fullyQualifiedTemplateTitle(function)
-            if not templateTitle:
-                logging.warn("Template with empty title")
-            pair = next((x for x in frame if x[0] == templateTitle), None)
-            if pair:
-                params = pair[1]
+            # Use the innermost (most recently entered) frame entry --
+            # frame is a proper stack (see expandTemplate: appended
+            # right before expanding a template's body, popped right
+            # after), so frame[-1] is exactly the template invocation
+            # that directly encloses this #invoke call, matching real
+            # Scribunto's frame:getParent() semantics. Don't match by
+            # guessing the calling template's title from the function
+            # name instead -- that only works when they happen to
+            # coincide (e.g. Template:Convert invoking "convert"), and
+            # silently breaks for any differently-named alias template
+            # invoking the same function (e.g. {{cvt|...}}).
+            if frame:
+                params = frame[-1][1]
                 # extract positional args
                 params = [params.get(str(i + 1)) for i in range(len(params))]
                 return funct(*params)
@@ -1641,6 +2398,8 @@ parserFunctions = {
 
     'int': lambda string, *rest: str(int(string)),
 
+    'padleft': lambda char, width, string: string.ljust(char, int(pad)), # CHECK_ME
+
 }
 
 
@@ -1648,6 +2407,8 @@ def callParserFunction(functionName, args, frame):
     """
     Parser functions have similar syntax as templates, except that
     the first argument is everything after the first colon.
+    :param functionName: nameof the parser function
+    :param args: the arguments to the function
     :return: the result of the invocation, None in case of failure.
 
     http://meta.wikimedia.org/wiki/Help:ParserFunctions
@@ -1657,11 +2418,11 @@ def callParserFunction(functionName, args, frame):
         if functionName == '#invoke':
             # special handling of frame
             ret = sharp_invoke(args[0].strip(), args[1].strip(), frame)
-            # logging.debug('parserFunction> %s %s', functionName, ret)
+            # logger.debug('parserFunction> %s %s', args[1], ret)
             return ret
         if functionName in parserFunctions:
             ret = parserFunctions[functionName](*args)
-            # logging.debug('parserFunction> %s %s', functionName, ret)
+            # logger.debug('parserFunction> %s(%s) %s', functionName, args, ret)
             return ret
     except:
         return ""  # FIXME: fix errors
@@ -1675,7 +2436,7 @@ def callParserFunction(functionName, args, frame):
 reNoinclude = re.compile(r'<noinclude>(?:.*?)</noinclude>', re.DOTALL)
 reIncludeonly = re.compile(r'<includeonly>|</includeonly>', re.DOTALL)
 
-# These are built before spawning processes, hence thay are shared.
+# These are built before spawning processes, hence they are shared.
 templates = {}
 redirects = {}
 # cache of parser templates
@@ -1693,8 +2454,18 @@ def define_template(title, page):
 
     # title = normalizeTitle(title)
 
+    # An empty page (zero lines) is a genuine, valid case for a
+    # template whose current revision has no content at all (a
+    # self-closing <text bytes="0" .../> in the source) -- not a
+    # redirect, and not any real content either. Reachable now that
+    # collect_pages()/load_templates() correctly recognize that
+    # self-closing form instead of silently merging the next page's
+    # content into this one.
+    if not page:
+        return
+
     # check for redirects
-    m = re.match('#REDIRECT.*?\[\[([^\]]*)]]', page[0], re.IGNORECASE)
+    m = redirectRE.match(page[0])
     if m:
         redirects[title] = m.group(1)  # normalizeTitle(m.group(1))
         return
@@ -1728,6 +2499,6 @@ def define_template(title, page):
         text = reIncludeonly.sub('', text)
 
     if text:
-        if title in templates:
-            logging.warn('Redefining: %s', title)
+        if title in templates and templates[title] != text:
+            logger.warning('Redefining: %s', title)
         templates[title] = text
