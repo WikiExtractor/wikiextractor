@@ -32,6 +32,18 @@ Four modes:
                  pages are written in the order they appear in the source
                  dump, not the order given on the command line.
 
+--extract-templates (combine with --extract-id or --start/--end):
+  After writing the requested page(s), also discover and append every
+  template those pages actually reference, using
+  extract_templates_by_id's own real-expansion-based discovery
+  machinery (see that script's own module docstring for why this is
+  used instead of a "{{" regex scanner) -- reused directly here via
+  import, not reimplemented. Requires --templates (the large templates
+  file to search). The result is a single, self-contained output file
+  with both the page(s) and everything they need to fully re-extract,
+  rather than needing extract_templates_by_id.py run separately
+  afterward as a second step.
+
 Usage:
     python extract_page_range.py --input urwiki-20260701-pages-articles-multistream.xml.bz2 --count
 
@@ -49,6 +61,12 @@ Usage:
     python extract_page_range.py --input pnwiki-20260701-pages-articles.xml.bz2 \
         --extract-id 49,59 --output two_pages.xml.bz2
 
+    python extract_page_range.py --input urwiki-20260701-pages-articles.xml.bz2 \
+        --extract-id 2376854 --templates urwiki-templates.xml.bz2 --extract-templates \
+        --output repro.xml.bz2
+    # repro.xml.bz2 now has page 2376854 AND every template it needs,
+    # ready to feed straight into wikiextractor on its own.
+
 Binary search workflow (for bisecting a stall):
     1. --count to get total page count N.
     2. Split [0, N) in half, extract both halves, run wikiextractor on each
@@ -60,19 +78,30 @@ Binary search workflow (for bisecting a stall):
        article by watching the last debug line printed.
     5. Once you know the specific page id, --extract-id pulls it out
        directly for isolated testing, without repeating the bisection.
+       Add --templates/--extract-templates to get a fully self-contained
+       repro in one pass, rather than a second, separate script run.
 
 Notes:
-    - Streams the input; never holds the whole dump in memory.
+    - Streams the input; never holds the whole dump in memory (except
+      the page text collected for --extract-templates' own discovery
+      pass, which needs it in memory the same way
+      extract_templates_by_id.py already does).
     - Detects <page> / </page> on their own (whitespace-trimmed) line, which
       is how Wikimedia dumps are always formatted. Page content is XML-escaped
       by the exporter, so a literal "<page>" line can't appear inside article
       text.
     - Output is written as .bz2 if the --output path ends in .bz2, otherwise
       as plain XML text.
+    - --extract-templates requires wikiextractor's extract.py and this
+      script's own extract_templates_by_id.py to both be importable
+      (e.g. both on $PYTHONPATH, or extract_templates_by_id.py in the
+      same directory as this script) -- only imported when actually
+      needed, so --count/--find-id/plain extraction never require them.
 """
 
 import argparse
 import bz2
+import os
 import re
 import sys
 
@@ -155,6 +184,60 @@ def stream_pages(input_path):
             header_lines.append(line)
 
 
+def extract_wikitext(page_text):
+    """Pulls just the <text>...</text> content out of one raw <page>
+    block -- used to build the {id: wikitext} mapping
+    extract_templates_by_id's discover_and_extract() expects, from
+    pages we've already read for --extract-templates' sake."""
+    m = re.search(r'<text[^>]*>(.*?)</text>', page_text, re.DOTALL)
+    return m.group(1) if m else ''
+
+
+def extract_templates_for_pages(out, page_texts_by_id, templates_path, max_passes):
+    """
+    Discovers and writes out every template referenced by the given
+    pages, appending them to the same output file the page(s)
+    themselves were just written to. Reuses
+    extract_templates_by_id.discover_and_extract() directly rather
+    than reimplementing the discovery logic -- see that script's own
+    module docstring for why the real expansion machinery is used
+    instead of a regex heuristic.
+
+    page_texts_by_id: {id: wikitext}, exactly what discover_and_extract()
+    expects (note: str ids here, matching how it keys its own frame/
+    lookup bookkeeping -- callers should pass str(page_id), not int).
+    """
+    try:
+        import extract_templates_by_id as etbi
+    except ImportError:
+        print("ERROR: --extract-templates requires extract_templates_by_id.py "
+              "to be importable (same directory as this script, or on "
+              "$PYTHONPATH).", file=sys.stderr)
+        sys.exit(1)
+    try:
+        import wikiextractor.extract as ex
+    except ImportError:
+        print("ERROR: --extract-templates requires wikiextractor's extract.py "
+              "to be importable (e.g. on $PYTHONPATH already).", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Discovering templates referenced by {len(page_texts_by_id)} page(s)...",
+          file=sys.stderr)
+    loaded_pages, never_found = etbi.discover_and_extract(
+        ex, page_texts_by_id, templates_path, max_passes)
+
+    for title, page_text in loaded_pages.items():
+        out.write(page_text)
+
+    print(f"Wrote {len(loaded_pages)} template(s):", file=sys.stderr)
+    for title in loaded_pages:
+        print(f"  {title}", file=sys.stderr)
+    if never_found:
+        missing = ', '.join(sorted(never_found))
+        print(f"WARNING: {len(never_found)} referenced title(s) never found "
+              f"in --templates: {missing}", file=sys.stderr)
+
+
 def do_count(input_path):
     n = 0
     for kind, _ in stream_pages(input_path):
@@ -179,11 +262,13 @@ def do_find_id(input_path, page_id):
     return None
 
 
-def do_extract(input_path, output_path, start, end):
+def do_extract(input_path, output_path, start, end, templates_path=None,
+                extract_templates=False, max_passes=20):
     header = None
     footer = '</mediawiki>\n'
     idx = 0
     kept = 0
+    page_texts_by_id = {}  # only populated if extract_templates is set
 
     out = open_maybe_bz2_write(output_path)
     try:
@@ -195,12 +280,18 @@ def do_extract(input_path, output_path, start, end):
                 if start <= idx < end:
                     out.write(text)
                     kept += 1
+                    if extract_templates:
+                        id_m = re.search(r'<id>(\d+)</id>', text)
+                        if id_m:
+                            page_texts_by_id[id_m.group(1)] = extract_wikitext(text)
                 idx += 1
                 if idx >= end:
                     # We've collected everything we need; still need footer.
                     break
             elif kind == 'footer':
                 footer = text
+        if extract_templates and page_texts_by_id:
+            extract_templates_for_pages(out, page_texts_by_id, templates_path, max_passes)
         out.write(footer)
     finally:
         out.close()
@@ -211,7 +302,8 @@ def do_extract(input_path, output_path, start, end):
               "page count (use --count first).", file=sys.stderr)
 
 
-def do_extract_ids(input_path, output_path, page_ids):
+def do_extract_ids(input_path, output_path, page_ids, templates_path=None,
+                    extract_templates=False, max_passes=20):
     """
     Find the page(s) with the given <id>(s) and write them out as a
     standalone dump. Single streaming pass: stops as soon as every
@@ -227,6 +319,7 @@ def do_extract_ids(input_path, output_path, page_ids):
     footer = '</mediawiki>\n'
     still_needed = set(page_ids)
     found_ids = []
+    page_texts_by_id = {}  # only populated if extract_templates is set
 
     out = open_maybe_bz2_write(output_path)
     try:
@@ -240,10 +333,14 @@ def do_extract_ids(input_path, output_path, page_ids):
                     out.write(text)
                     found_ids.append(int(m.group(1)))
                     still_needed.discard(int(m.group(1)))
+                    if extract_templates:
+                        page_texts_by_id[m.group(1)] = extract_wikitext(text)
                     if not still_needed:
                         break
             elif kind == 'footer':
                 footer = text
+        if extract_templates and page_texts_by_id:
+            extract_templates_for_pages(out, page_texts_by_id, templates_path, max_passes)
         out.write(footer)
     finally:
         out.close()
@@ -267,7 +364,28 @@ def main():
     ap.add_argument('--start', type=int, help='Start page index (0-based, inclusive)')
     ap.add_argument('--end', type=int, help='End page index (exclusive)')
     ap.add_argument('--output', help='Output path (.xml or .xml.bz2)')
+    ap.add_argument('--templates', help='Templates file to search when --extract-templates is given '
+                                         '(.xml or .xml.bz2)')
+    ap.add_argument('--extract-templates', action='store_true',
+                     help='Also discover and append every template referenced by the extracted '
+                          'page(s), using extract_templates_by_id\'s own discovery machinery. '
+                          'Requires --templates, and either --extract-id or --start/--end.')
+    ap.add_argument('--max-passes', type=int, default=20,
+                     help='With --extract-templates: safety cap on transitive-dependency '
+                          'discovery passes (default: 20)')
     args = ap.parse_args()
+
+    if args.extract_templates and not args.templates:
+        ap.error('--extract-templates requires --templates')
+
+    if args.templates and not args.extract_templates:
+        print("NOTE: --templates given without --extract-templates -- ignored.", file=sys.stderr)
+
+    if args.extract_templates:
+        # extract_templates_by_id.py is expected alongside this script;
+        # make sure it's importable even if this script was invoked
+        # from a different working directory.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
     if args.count:
         do_count(args.input)
@@ -280,13 +398,19 @@ def main():
     if args.extract_id is not None:
         if not args.output:
             ap.error('--extract-id requires --output')
-        do_extract_ids(args.input, args.output, args.extract_id)
+        do_extract_ids(args.input, args.output, args.extract_id,
+                        templates_path=args.templates,
+                        extract_templates=args.extract_templates,
+                        max_passes=args.max_passes)
         return
 
     if args.start is None or args.end is None or not args.output:
         ap.error('--start, --end, and --output are required unless --count is given')
 
-    do_extract(args.input, args.output, args.start, args.end)
+    do_extract(args.input, args.output, args.start, args.end,
+               templates_path=args.templates,
+               extract_templates=args.extract_templates,
+               max_passes=args.max_passes)
 
 
 if __name__ == '__main__':
