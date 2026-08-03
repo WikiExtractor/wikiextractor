@@ -208,9 +208,9 @@ class OutputSplitter():
     def open(self, filename):
         self.size = 0
         if self.compress:
-            return bz2.open(filename + '.bz2', 'wt')
+            return bz2.open(filename + '.bz2', 'wt', encoding='utf-8')
         else:
-            return open(filename, 'w')
+            return open(filename, 'w', encoding='utf-8')
 
 
 # ----------------------------------------------------------------------
