@@ -31,6 +31,22 @@ actual fix keeps bz2.BZ2File for the compressed branch (preserving
 .tell()), and instead has write() itself encode to UTF-8 bytes before
 writing, only for the compressed case.
 
+Later replaced with a cleaner approach (adapted from PR #333):
+tracking a self.size counter incremented by write()'s own return
+value, rather than depending on self.file.tell() at all -- this
+avoids needing any particular stream type to support .tell()
+correctly in the first place. But this introduced a different, real
+bug of its own: for a text-mode file object, write(str) returns the
+number of CHARACTERS written, not bytes -- fine for pure ASCII, but a
+significant undercount for non-ASCII-heavy content (confirmed with
+real Saraiki/Arabic-script text, where most characters take 2+ bytes
+in UTF-8), silently letting max_file_size be measured in the wrong
+unit and output files grow substantially larger than requested (a
+100,000-byte target produced a 156,000-byte actual file). Fixed by
+computing len(data.encode('utf-8')) explicitly for both the reserve()
+check and the size counter, rather than trusting write()'s return
+value or len(data) (character count) for either.
+
 Run with:
     python -m unittest tests.test_output_splitter -v
 or, from the tests/ directory:
@@ -77,6 +93,56 @@ class OutputSplitterTestCase(unittest.TestCase):
         prefix = os.path.join(self.tmpdir, name)
         self._paths.append(prefix + '*')
         return we.OutputSplitter(FakeNextFile(prefix), max_file_size, compress)
+
+
+class ByteAccurateSizeTrackingTests(OutputSplitterTestCase):
+    """The file-splitting size limit is documented and specified in
+    bytes (--bytes / max_file_size), so it must be tracked in bytes
+    regardless of how many bytes a given piece of text happens to
+    take in UTF-8 -- confirmed this silently broke for non-ASCII-heavy
+    content specifically, not just as a theoretical unit mismatch.
+    """
+
+    # Real, representative Saraiki (Arabic-script) text -- not just a
+    # couple of accented Latin characters, since the bug's actual
+    # impact scales with how much of the content is outside ASCII.
+    SARAIKI_CHUNK = 'ݙݙݙ سنسکرت ٻولی وچ لکھے ہوئے ودا کتاباں دی \n'
+
+    def test_compressed_output_file_size_respects_byte_limit_with_non_ascii_text(self):
+        max_size = 100_000
+        splitter = self.make_splitter('_os_bytes_compressed', compress=True,
+                                       max_file_size=max_size)
+        for _ in range(2000):
+            splitter.write(self.SARAIKI_CHUNK)
+        splitter.close()
+
+        files = sorted(glob.glob(f'{splitter.nextFile.prefix}_*.bz2'))
+        self.assertGreater(len(files), 1,
+                            "expected this much text to require more than one file")
+        for path in files[:-1]:  # the last file is a partial remainder, not bound by the limit
+            with bz2.open(path, 'rt', encoding='utf-8') as f:
+                actual_bytes = len(f.read().encode('utf-8'))
+            self.assertLessEqual(
+                actual_bytes, max_size,
+                f"{path}: {actual_bytes} bytes exceeds the {max_size}-byte limit "
+                f"-- size tracking must be counting characters, not bytes")
+
+    def test_uncompressed_output_file_size_respects_byte_limit_with_non_ascii_text(self):
+        max_size = 100_000
+        splitter = self.make_splitter('_os_bytes_plain', compress=False,
+                                       max_file_size=max_size)
+        for _ in range(2000):
+            splitter.write(self.SARAIKI_CHUNK)
+        splitter.close()
+
+        files = sorted(glob.glob(f'{splitter.nextFile.prefix}_*'))
+        self.assertGreater(len(files), 1,
+                            "expected this much text to require more than one file")
+        for path in files[:-1]:
+            actual_bytes = os.path.getsize(path)
+            self.assertLessEqual(
+                actual_bytes, max_size,
+                f"{path}: {actual_bytes} bytes exceeds the {max_size}-byte limit")
 
 
 class CompressedWritingTests(OutputSplitterTestCase):

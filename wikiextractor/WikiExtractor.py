@@ -196,8 +196,9 @@ class OutputSplitter():
             self.file = self.open(self.nextFile.next())
 
     def write(self, data):
-        self.reserve(len(data))
-        self.size += self.file.write(data)
+        data_bytes = data.encode('utf-8')
+        self.reserve(len(data_bytes))
+        self.size += self.file.write(data_bytes)
 
     def close(self):
         self.file.close()
@@ -205,9 +206,9 @@ class OutputSplitter():
     def open(self, filename):
         self.size = 0
         if self.compress:
-            return bz2.open(filename + '.bz2', 'wt', encoding='utf-8')
+            return bz2.BZ2File(filename + '.bz2', 'w')
         else:
-            return open(filename, 'w', encoding='utf-8')
+            return open(filename, 'wb')
 
 
 # ----------------------------------------------------------------------
