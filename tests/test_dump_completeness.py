@@ -25,6 +25,15 @@ up in the output -- exactly the kind of "N pages in, N pages out"
 check that would have caught this immediately, and should now guard
 against it recurring.
 
+build_synthetic_dump()'s <siteinfo> declares a real key="10" (Template)
+namespace entry, matching actual MediaWiki dump structure -- not just
+decoration. collect_pages()'s own page-inclusion check relies on
+templateNamespace being populated from exactly this entry; leaving it
+out means templateNamespace stays at its default, empty string, and
+since every string "starts with" an empty string, the (separately
+fixed) check for "not a template page" then incorrectly excludes
+every page in the dump, not just template pages.
+
 Run with:
     python -m unittest tests.test_dump_completeness -v
 or, from the tests/ directory:
@@ -50,6 +59,7 @@ def build_synthetic_dump(path, n_pages):
         '  <siteinfo>\n'
         '    <sitename>Test</sitename>\n'
         '    <namespaces>\n'
+        '      <namespace key="10" case="first-letter">Template</namespace>\n'
         '      <namespace key="0" case="first-letter" />\n'
         '    </namespaces>\n'
         '  </siteinfo>\n'
