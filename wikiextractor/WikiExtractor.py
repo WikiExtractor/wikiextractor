@@ -97,13 +97,10 @@ def configure_mapreduce_logging(enabled):
     are real multiprocessing.Process instances, and under the "spawn"
     start method (unlike "fork"), a child re-imports the module fresh
     and does NOT inherit a level set on the parent's already-running
-    logger after import -- confirmed directly (a spawned child's
-    logger showed effective level WARNING, not DEBUG, despite the
-    parent having set DEBUG on the same named logger beforehand).
-    Calling this at the top of each of those functions -- rather than
-    passing a boolean into every individual logging call -- is what
-    lets call sites just be unconditional mapreduce_logger.debug(...)
-    calls throughout the rest of this file.
+    logger after import. Calling this at the top of each of those
+    functions -- rather than passing a boolean into every individual
+    logging call -- is what lets call sites just be unconditional
+    mapreduce_logger.debug(...) calls throughout the rest of this file.
     """
     mapreduce_logger.setLevel(logging.DEBUG if enabled else logging.WARNING)
     if not mapreduce_logger.handlers:
@@ -724,9 +721,8 @@ def reduce_process(output_queue, out_file, file_size, file_compress, debug_map_r
         # than receiving an already-open copy from the parent), there
         # is no other copy anywhere that could flush this one's
         # buffered data -- without this, its last buffered write(s)
-        # are simply lost when it exits, with no error at all.
-        # Confirmed directly: this reliably dropped exactly the last
-        # page from every dump tested, regardless of size.
+        # are simply lost when it exits, with no error at all,
+        # reliably dropping exactly the last page from every dump.
         if output != sys.stdout:
             output.close()
 
