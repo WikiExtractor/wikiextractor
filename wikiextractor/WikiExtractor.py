@@ -324,6 +324,7 @@ def collect_pages(text):
     page = []
     id = ''
     revid = ''
+    ns = ''
     last_id = ''
     inText = False
     redirect = False
@@ -338,6 +339,7 @@ def collect_pages(text):
         tag = m.group(2)
         if tag == 'page':
             page = []
+            ns = ''
             redirect = False
         elif tag == 'id' and not id:
             id = m.group(3)
@@ -345,6 +347,8 @@ def collect_pages(text):
             revid = m.group(3)
         elif tag == 'title':
             title = m.group(3)
+        elif tag == 'ns':
+            ns = m.group(3)
         elif tag == 'redirect':
             redirect = True
         elif tag == 'text':
@@ -371,13 +375,18 @@ def collect_pages(text):
         elif inText:
             page.append(line)
         elif tag == '/page':
-            colon = title.find(':')
-            if ((colon < 0 or (title[:colon] in acceptedNamespaces)) and
-                (id != last_id and not redirect and not title.startswith(templateNamespace))):
+            # Only the Main/Article namespace (ns=0) is ever wanted here --
+            # not inferred from a colon in the title (that broke on
+            # ordinary ns=0 titles that happen to contain one, e.g.
+            # "Kill Bill: Volume 1" -- see issue #254), but read directly
+            # from the page's own <ns> element, which is authoritative.
+            if (ns == '0' and id != last_id and not redirect and
+                    not title.startswith(templateNamespace)):
                 yield (id, revid, title, page)
                 last_id = id
             id = ''
             revid = ''
+            ns = ''
             page = []
             inText = False
             redirect = False
