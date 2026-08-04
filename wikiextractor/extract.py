@@ -75,7 +75,27 @@ discardElements = [
     'form', 'input', 'select', 'option', 'textarea',
     'ul', 'li', 'ol', 'dl', 'dt', 'dd', 'menu', 'dir',
     'ref', 'references', 'img', 'imagemap', 'source', 'small',
-    'inputbox'
+    'inputbox',
+    # includeonly is the direct counterpart of noinclude above, and the
+    # same reasoning applies: it's a template-specific construct, its
+    # content is only ever meant to be visible when the page is
+    # TRANSCLUDED elsewhere (the opposite of noinclude), never on a
+    # direct/standalone view -- which is exactly the only context a
+    # regular (ns=0) article is ever extracted in. Its appearance in a
+    # regular article is the same kind of copy-paste artifact noinclude
+    # already accounts for. Confirmed on a real pnb.wikipedia.org page
+    # (id 38683) whose entire visible body was just stray
+    # "<includeonly> · </includeonly>" markup, left untouched (and
+    # HTML-escaped, since it wasn't a tag the rest of the pipeline
+    # recognized) rather than discarded like noinclude already is.
+    'includeonly',
+    # A MediaWiki extension tag (from the CategoryTree extension) that
+    # dynamically renders a live category hierarchy from the wiki's own
+    # database -- nothing meaningful for a static text extractor to
+    # produce from it either way, same category as gallery/timeline
+    # above. Confirmed leaking through verbatim (also HTML-escaped) on
+    # a real pnb.wikipedia.org page (id 40471).
+    'categorytree',
 ]
 
 ##
