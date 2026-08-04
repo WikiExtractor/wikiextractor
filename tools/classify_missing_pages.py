@@ -115,6 +115,11 @@ def collect_doc_ids(path, verbose_label):
                             ids[m.group(1)] = m.group(2)
         except (OSError, UnicodeDecodeError) as e:
             print(f"  warning: could not read {fpath}: {e}", file=sys.stderr)
+    if file_count == 0:
+        raise SystemExit(
+            f"error: --{verbose_label} path {path!r} matched no files to scan "
+            f"(nonexistent path, empty directory, or a typo?) -- refusing to "
+            f"silently treat this as \"0 pages\"")
     print(f"[{verbose_label}] scanned {file_count} file(s), found {len(ids)} doc ids",
           file=sys.stderr)
     return ids
