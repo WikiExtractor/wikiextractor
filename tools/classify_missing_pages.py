@@ -188,15 +188,23 @@ def collect_doc_ids(path, verbose_label):
     return ids
 
 
-def scan_dump_for_ids(dump_path, target_ids, early_exit=True):
+def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None):
     """
     Stream through the original XML dump looking for <page> blocks whose
     page id is in target_ids. Returns {id: info_dict} where info_dict has
-    keys: title, has_redirect, text_len, trailing_len, trailing_preview.
+    keys: title, has_redirect, text_len, raw_trailing_len,
+    raw_trailing_preview, extracted_len, extracted_preview,
+    extraction_error.
 
     Only buffers one page's worth of lines at a time, and (by default) stops
     once every target id has been found, so this is safe to run against a
     full-size dump even though we only care about a handful of ids.
+
+    If ex_module (wikiextractor.extract) is given, each matched redirect
+    page's raw wikitext is also run through the real clean_text() pipeline
+    -- see _parse_page_block() -- so trailing_len reflects what would
+    actually have shown up in the extracted corpus rather than raw dump
+    byte count.
     """
     remaining = set(target_ids)
     total_targets = len(target_ids)
@@ -232,7 +240,7 @@ def scan_dump_for_ids(dump_path, target_ids, early_exit=True):
                 if '</page>' in line:
                     in_page = False
                     if page_id in remaining:
-                        results[page_id] = _parse_page_block(''.join(page_lines))
+                        results[page_id] = _parse_page_block(''.join(page_lines), ex_module)
                         remaining.discard(page_id)
                         pbar.set_postfix(found=f"{len(results)}/{total_targets}")
                     page_lines = []
@@ -242,10 +250,12 @@ def scan_dump_for_ids(dump_path, target_ids, early_exit=True):
     return results, remaining
 
 
-def _parse_page_block(block):
+def _parse_page_block(block, ex_module=None):
     title_m = TITLE_RE.search(block)
     title = title_m.group(1) if title_m else ''
     has_redirect = bool(REDIRECT_TAG_RE.search(block))
+    id_m = PAGE_ID_RE.search(block)
+    page_id = id_m.group(1) if id_m else ''
 
     text_open_m = TEXT_OPEN_RE.search(block)
     text = ''
@@ -258,23 +268,62 @@ def _parse_page_block(block):
     lines = stripped.split('\n') if stripped else []
     trailing = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ''
 
-    return {
+    result = {
         'title': title,
         'has_redirect': has_redirect,
         'text_len': len(stripped),
-        'trailing_len': len(trailing),
-        'trailing_preview': trailing[:80].replace('\n', ' '),
+        'raw_trailing_len': len(trailing),
+        'raw_trailing_preview': trailing[:80].replace('\n', ' '),
+        # Populated only when running with real extraction verification
+        # (the default; see --no-extraction-check). None means "not run",
+        # as distinct from 0, which means "ran, and it's genuinely empty".
+        'extracted_len': None,
+        'extracted_preview': '',
+        'extraction_error': '',
     }
+
+    # Only worth actually running the extractor if there's a <redirect>
+    # tag (otherwise this isn't the case we're trying to measure at all)
+    # and some raw trailing text exists in the first place (an empty
+    # trailing section trivially extracts to nothing).
+    if ex_module is not None and has_redirect and trailing:
+        try:
+            extractor = ex_module.Extractor(
+                page_id, page_id, f"https://example.org/wiki?curid={page_id}",
+                title, [stripped])
+            # Run on the full page text, redirect line included, to
+            # exactly mirror what the real extraction pipeline does in
+            # Extractor.extract() -- not just the trailing portion in
+            # isolation, in case the redirect line itself affects how
+            # the rest of the text gets parsed.
+            extracted = extractor.clean_text(stripped)
+            extracted_text = '\n'.join(extracted).strip()
+            result['extracted_len'] = len(extracted_text)
+            result['extracted_preview'] = extracted_text[:80].replace('\n', ' ')
+        except Exception as e:
+            # A page that fails to extract cleanly still tells us
+            # something (worth a manual look) -- don't let one bad page
+            # abort the whole run.
+            result['extraction_error'] = f"{type(e).__name__}: {e}"
+
+    return result
 
 
 def classify(info, trailing_threshold):
     if info is None:
         return 'NOT_FOUND_IN_DUMP'
-    if info['has_redirect']:
-        if info['trailing_len'] > trailing_threshold:
-            return 'REDIRECT_WITH_CONTENT'
-        return 'REDIRECT_TRIVIAL'
-    return 'NOT_A_REDIRECT'
+    if not info['has_redirect']:
+        return 'NOT_A_REDIRECT'
+    # Prefer the real extracted length when we have it -- it's what
+    # actually would or wouldn't have shown up in the corpus. Fall back
+    # to the raw dump byte count only when extraction verification
+    # wasn't run at all (--no-extraction-check, or ex_module unavailable).
+    length = info['extracted_len']
+    if length is None:
+        length = info['raw_trailing_len']
+    if length > trailing_threshold:
+        return 'REDIRECT_WITH_CONTENT'
+    return 'REDIRECT_TRIVIAL'
 
 
 def main():
@@ -283,15 +332,51 @@ def main():
     ap.add_argument('--before', required=True, help='extractor output before the change (file or dir)')
     ap.add_argument('--after', required=True, help='extractor output after the change (file or dir)')
     ap.add_argument('--dump', required=True, help='original XML dump (.xml, .bz2, or .gz)')
+    ap.add_argument('--templates', help='optional templates file (<page>/<title>/<text> shape, as '
+                          'produced by load_templates()/extract_page_range.py --templates) to load '
+                          'before running the extraction check, so templates referenced in a '
+                          'redirect page\'s trailing content resolve to their real content instead '
+                          'of nothing. Without this, template calls in trailing content resolve to '
+                          'nothing, same as an undefined template -- fine for the common case '
+                          '(maintenance/categorization templates, which are supposed to produce '
+                          'nothing), but can UNDERstate real content for a redirect whose trailing '
+                          'text pulls in a real content template (e.g. an infobox).')
     ap.add_argument('--trailing-threshold', type=int, default=20,
                      help='chars of trailing content above which a redirect '
-                          'is REDIRECT_WITH_CONTENT rather than REDIRECT_TRIVIAL '
-                          '(default: 20)')
+                          'is REDIRECT_WITH_CONTENT rather than REDIRECT_TRIVIAL. '
+                          'Applies to the real extracted length when the extraction '
+                          'check ran (the default), or to raw dump byte count '
+                          'otherwise (--no-extraction-check) (default: 20)')
+    ap.add_argument('--no-extraction-check', action='store_true',
+                     help='skip running the real clean_text() extraction pipeline on '
+                          'each candidate redirect page, and classify from raw dump '
+                          'byte count alone (faster, no wikiextractor dependency, but '
+                          'raw wikitext bytes routinely overstate real content -- e.g. '
+                          'maintenance templates and category tags count as bytes here '
+                          'but produce no visible output at all)')
     ap.add_argument('--csv', help='optional path to write a CSV report')
     ap.add_argument('--no-early-exit', action='store_true',
                      help='scan the whole dump even after all missing ids are found '
                           '(useful for sanity-checking id coverage)')
     args = ap.parse_args()
+
+    ex_module = None
+    if not args.no_extraction_check:
+        try:
+            import wikiextractor.extract as ex_module
+            if args.templates:
+                import wikiextractor.WikiExtractor as we
+                print(f"Loading templates from {args.templates}...", file=sys.stderr)
+                with we.decode_open(args.templates) as f:
+                    count = we.load_templates(f)
+                print(f"Loaded {count} templates.", file=sys.stderr)
+        except ImportError as e:
+            print(f"warning: --no-extraction-check was not given, but wikiextractor isn't "
+                  f"importable ({e}) -- falling back to raw dump byte counts instead of real "
+                  f"extraction. Put wikiextractor on PYTHONPATH to get real extracted-content "
+                  f"lengths, or pass --no-extraction-check to silence this warning.",
+                  file=sys.stderr)
+            ex_module = None
 
     before_ids = collect_doc_ids(args.before, 'before')
     after_ids = collect_doc_ids(args.after, 'after')
@@ -305,7 +390,8 @@ def main():
         return
 
     dump_info, not_found = scan_dump_for_ids(args.dump, missing,
-                                              early_exit=not args.no_early_exit)
+                                              early_exit=not args.no_early_exit,
+                                              ex_module=ex_module)
 
     rows = []
     counts = {}
@@ -319,8 +405,11 @@ def main():
             'classification': label,
             'has_redirect': info['has_redirect'] if info else '',
             'text_len': info['text_len'] if info else '',
-            'trailing_len': info['trailing_len'] if info else '',
-            'trailing_preview': info['trailing_preview'] if info else '',
+            'raw_trailing_len': info['raw_trailing_len'] if info else '',
+            'raw_trailing_preview': info['raw_trailing_preview'] if info else '',
+            'extracted_len': info['extracted_len'] if info else '',
+            'extracted_preview': info['extracted_preview'] if info else '',
+            'extraction_error': info['extraction_error'] if info else '',
         })
 
     # Print a human-readable summary, flagged cases first.
@@ -333,7 +422,15 @@ def main():
         flag = " <-- CHECK THIS" if r['classification'] in ('NOT_A_REDIRECT', 'NOT_FOUND_IN_DUMP') else ""
         print(f"[{r['classification']:<22}] id={r['id']:<10} title={r['title']!r}{flag}")
         if r['classification'] == 'REDIRECT_WITH_CONTENT':
-            print(f"                          trailing={r['trailing_len']} chars: {r['trailing_preview']!r}")
+            if r['extraction_error']:
+                print(f"                          extraction FAILED ({r['extraction_error']}) "
+                      f"-- classified from raw dump bytes: {r['raw_trailing_len']} chars")
+            elif r['extracted_len'] is not None:
+                print(f"                          extracted={r['extracted_len']} chars: "
+                      f"{r['extracted_preview']!r}  (raw dump bytes: {r['raw_trailing_len']})")
+            else:
+                print(f"                          raw dump bytes: {r['raw_trailing_len']} chars: "
+                      f"{r['raw_trailing_preview']!r}  (no extraction check ran)")
     print("=" * 100)
     print("Summary:", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
 
