@@ -60,6 +60,29 @@ import re
 import sys
 import csv as csv_module
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    class tqdm:
+        """Minimal fallback with just enough surface for how this script
+        uses it: a context manager with .update() for byte-based
+        progress and .set_postfix() for the running found-count."""
+        def __init__(self, total=None, desc=None, unit=None, unit_scale=None,
+                     unit_divisor=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def update(self, n=1):
+            pass
+
+        def set_postfix(self, **kwargs):
+            pass
+
 DOC_OPEN_RE = re.compile(r'<doc\s+id="(\d+)"[^>]*?title="([^"]*)"[^>]*>')
 
 PAGE_ID_RE = re.compile(r'<id>(\d+)</id>')
@@ -67,6 +90,46 @@ TITLE_RE = re.compile(r'<title>(.*?)</title>', re.S)
 REDIRECT_TAG_RE = re.compile(r'<redirect\b')
 TEXT_OPEN_RE = re.compile(r'<text[^>]*>')
 TEXT_CLOSE_RE = re.compile(r'</text>')
+
+
+class _ProgressReader:
+    """Wraps a raw binary file object, calling pbar.update() with the
+    number of bytes actually read off of it. Handed to bz2.open()/
+    gzip.open() as their `filename` argument (both accept a file object
+    in place of a path) so the progress bar reflects bytes consumed
+    from disk -- i.e. how far through the (compressed) dump file we
+    are -- regardless of the decompressed line-by-line iteration on
+    top. Anything other than read()/close() is delegated straight
+    through to the raw object, since that's all bz2/gzip need plus
+    whatever incidental attribute access shows up."""
+    def __init__(self, raw, pbar):
+        self._raw = raw
+        self._pbar = pbar
+
+    def read(self, *args, **kwargs):
+        data = self._raw.read(*args, **kwargs)
+        self._pbar.update(len(data))
+        return data
+
+    def close(self):
+        self._raw.close()
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def open_dump_with_progress(path, pbar):
+    """Like open_any(), but reads go through _ProgressReader first so
+    `pbar` advances by bytes actually consumed from the on-disk
+    (possibly compressed) file."""
+    raw = open(path, 'rb')
+    wrapped = _ProgressReader(raw, pbar)
+    if path.endswith('.bz2'):
+        return bz2.open(wrapped, 'rt', encoding='utf-8', errors='replace')
+    if path.endswith('.gz'):
+        return gzip.open(wrapped, 'rt', encoding='utf-8', errors='replace')
+    import io
+    return io.TextIOWrapper(wrapped, encoding='utf-8', errors='replace')
 
 
 def open_any(path, mode='rt'):
@@ -136,6 +199,7 @@ def scan_dump_for_ids(dump_path, target_ids, early_exit=True):
     full-size dump even though we only care about a handful of ids.
     """
     remaining = set(target_ids)
+    total_targets = len(target_ids)
     results = {}
 
     in_page = False
@@ -143,32 +207,37 @@ def scan_dump_for_ids(dump_path, target_ids, early_exit=True):
     page_id = None
     seen_first_id = False
 
-    with open_any(dump_path) as f:
-        for line in f:
-            if not in_page:
-                if '<page>' in line:
-                    in_page = True
-                    page_lines = [line]
-                    page_id = None
-                    seen_first_id = False
-                continue
+    dump_size = os.path.getsize(dump_path)
+    with tqdm(total=dump_size, desc="scanning dump", unit="B", unit_scale=True,
+              unit_divisor=1024) as pbar:
+        pbar.set_postfix(found=f"0/{total_targets}")
+        with open_dump_with_progress(dump_path, pbar) as f:
+            for line in f:
+                if not in_page:
+                    if '<page>' in line:
+                        in_page = True
+                        page_lines = [line]
+                        page_id = None
+                        seen_first_id = False
+                    continue
 
-            page_lines.append(line)
+                page_lines.append(line)
 
-            if not seen_first_id:
-                m = PAGE_ID_RE.search(line)
-                if m:
-                    page_id = m.group(1)
-                    seen_first_id = True
+                if not seen_first_id:
+                    m = PAGE_ID_RE.search(line)
+                    if m:
+                        page_id = m.group(1)
+                        seen_first_id = True
 
-            if '</page>' in line:
-                in_page = False
-                if page_id in remaining:
-                    results[page_id] = _parse_page_block(''.join(page_lines))
-                    remaining.discard(page_id)
-                page_lines = []
-                if early_exit and not remaining:
-                    break
+                if '</page>' in line:
+                    in_page = False
+                    if page_id in remaining:
+                        results[page_id] = _parse_page_block(''.join(page_lines))
+                        remaining.discard(page_id)
+                        pbar.set_postfix(found=f"{len(results)}/{total_targets}")
+                    page_lines = []
+                    if early_exit and not remaining:
+                        break
 
     return results, remaining
 
