@@ -1,10 +1,25 @@
 #!/usr/bin/env python3
 """
-find_missing_redirects.py
+classify_missing_pages.py
+
+SEE ALSO: confirm_redirect_keyword_causation.py -- a different, heavier
+tool for a different question. This script (classify_missing_pages.py)
+answers "did this page disappear entirely, and if so, is that because
+it's a genuine MediaWiki redirect?" by checking the raw dump directly --
+fast, and doesn't care what code change caused the disappearance.
+confirm_redirect_keyword_causation.py instead answers "did THIS specific
+content change happen because a newly-recognized redirect keyword was
+actually invoked during this article's own extraction?" by re-running
+the real extraction machinery -- slower, but causally confirms content
+*changes* too, not just pages that vanished outright. If a page's id is
+simply gone from the new output, this script is the right one; if a
+page's *text* changed, or you need to confirm a specific keyword/template
+mechanism rather than just "is the dump's own <redirect> tag set", use
+confirm_redirect_keyword_causation.py instead.
 
 Compares the output of two WikiExtractor runs (e.g. "before" and "after" a
-redirect-handling fix), finds page ids present in the "old" output but
-missing from the "new" output, and checks each missing id against the
+redirect-handling fix), finds page ids present in the "before" output but
+missing from the "after" output, and checks each missing id against the
 original XML dump to classify *why* it disappeared:
 
   - REDIRECT_WITH_CONTENT: the page has a <redirect> tag in the dump AND
@@ -14,7 +29,7 @@ original XML dump to classify *why* it disappeared:
     by hand.
   - REDIRECT_TRIVIAL: has a <redirect> tag but little/no trailing content.
     Also expected -- nothing of substance was dropped.
-  - NOT_A_REDIRECT: missing from the new output, but the dump shows no
+  - NOT_A_REDIRECT: missing from the "after" output, but the dump shows no
     <redirect> tag at all. This is NOT the expected pattern and deserves a
     closer look -- it means something other than pure redirect-filtering
     caused the page to disappear.
@@ -22,18 +37,18 @@ original XML dump to classify *why* it disappeared:
     (wrong dump file, id mismatch, or scan gave up early -- see --no-early-exit).
 
 Usage:
-    python3 find_missing_redirects.py \
-        --old  /path/to/old_output_dir_or_file \
-        --new  /path/to/new_output_dir_or_file \
-        --dump /path/to/xxwiki-latest-pages-meta-current.xml.bz2 \
+    python3 classify_missing_pages.py \
+        --before /path/to/before_output_dir_or_file \
+        --after  /path/to/after_output_dir_or_file \
+        --dump   /path/to/xxwiki-latest-pages-meta-current.xml.bz2 \
         [--trailing-threshold 20] \
         [--csv report.csv] \
         [--no-early-exit]
 
---old and --new each accept either a single file or a directory (searched
-recursively); files may be plain text, .bz2, or .gz, and either the
-classic <doc id="..." url="..." title="...">...</doc> format or WikiExtractor's
---json line format.
+--before and --after each accept either a single file or a directory
+(searched recursively); files may be plain text, .bz2, or .gz, and either
+the classic <doc id="..." url="..." title="...">...</doc> format or
+WikiExtractor's --json line format.
 """
 
 import argparse
@@ -191,8 +206,8 @@ def classify(info, trailing_threshold):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--old', required=True, help='old extractor output (file or dir)')
-    ap.add_argument('--new', required=True, help='new extractor output (file or dir)')
+    ap.add_argument('--before', required=True, help='extractor output before the change (file or dir)')
+    ap.add_argument('--after', required=True, help='extractor output after the change (file or dir)')
     ap.add_argument('--dump', required=True, help='original XML dump (.xml, .bz2, or .gz)')
     ap.add_argument('--trailing-threshold', type=int, default=20,
                      help='chars of trailing content above which a redirect '
@@ -204,11 +219,11 @@ def main():
                           '(useful for sanity-checking id coverage)')
     args = ap.parse_args()
 
-    old_ids = collect_doc_ids(args.old, 'old')
-    new_ids = collect_doc_ids(args.new, 'new')
+    before_ids = collect_doc_ids(args.before, 'before')
+    after_ids = collect_doc_ids(args.after, 'after')
 
-    missing = sorted(set(old_ids) - set(new_ids), key=int)
-    print(f"\n{len(missing)} page id(s) in old output but missing from new output\n",
+    missing = sorted(set(before_ids) - set(after_ids), key=int)
+    print(f"\n{len(missing)} page id(s) in 'before' output but missing from 'after' output\n",
           file=sys.stderr)
 
     if not missing:
@@ -226,7 +241,7 @@ def main():
         counts[label] = counts.get(label, 0) + 1
         rows.append({
             'id': pid,
-            'title': old_ids.get(pid, info['title'] if info else ''),
+            'title': before_ids.get(pid, info['title'] if info else ''),
             'classification': label,
             'has_redirect': info['has_redirect'] if info else '',
             'text_len': info['text_len'] if info else '',

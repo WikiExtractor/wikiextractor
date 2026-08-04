@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 """
-classify_redirect_diff.py
+confirm_redirect_keyword_causation.py
+
+SEE ALSO: classify_missing_pages.py -- a different, lighter tool for a
+different question. This script (confirm_redirect_keyword_causation.py)
+answers "did THIS specific content change happen because a newly-
+recognized redirect keyword was actually invoked during this article's
+own extraction?" by re-running the real extraction machinery on the
+article's own source wikitext -- slower, but causally confirms content
+*changes* too, not just pages that vanished outright, and ties the
+change to a specific template/keyword mechanism rather than just "the
+dump's own <redirect> tag is set". classify_missing_pages.py instead
+answers the narrower, faster question "did this page disappear
+entirely, and if so, is that because it's a genuine MediaWiki redirect?"
+by checking the raw dump directly, without caring what code change
+caused it. If a page's id is simply gone from the new output and you
+just want to sanity-check it's a real redirect, classify_missing_pages.py
+is the right (much faster) one; if you need to confirm a specific
+keyword/template mechanism actually fired for a specific article, or the
+article's *text* changed rather than vanished, use this script instead.
 
 Given full <doc>-formatted extraction outputs from before/after some
 change to extract.py (originally built for the localized-redirect-
@@ -29,7 +47,7 @@ Two real fixes, not just a progress bar papering over the slowness:
      documents that actually differ get a real (and now much smaller,
      per-document rather than whole-file) diff computed at all.
   2. For each document that DOES differ (or appears/disappears
-     entirely), look up its actual source wikitext in --source and
+     entirely), look up its actual source wikitext in --dump and
      re-run the real, instrumented extract.py machinery on it
      directly -- checking whether a redirect using one of the
      newly-recognized keywords was actually invoked during THIS
@@ -42,14 +60,14 @@ Two real fixes, not just a progress bar papering over the slowness:
 
 Usage:
     python3 classify_redirect_diff.py --before before.txt --after after.txt \
-        --templates templates.xml --source dump.xml.bz2
+        --templates templates.xml --dump dump.xml.bz2
 
 Notes:
     - Requires wikiextractor's extract.py to be importable (e.g. on
       $PYTHONPATH already).
     - --templates should be in the same <page>/<title>/<text> shape
       load_templates()'s own --output_file produces.
-    - --source is the original page dump those documents were
+    - --dump is the original page dump those documents were
       extracted from (.xml or .xml.bz2) -- needed to actually re-run
       extraction for causal confirmation, not just to read text from.
 """
@@ -116,7 +134,7 @@ def parse_docs(path):
     return result
 
 
-def get_source_wikitext_by_id(source_path, wanted_ids):
+def get_source_wikitext_by_id(dump_path, wanted_ids):
     """Returns {id: wikitext} for whichever of wanted_ids are found in
     the original source dump.
 
@@ -132,7 +150,7 @@ def get_source_wikitext_by_id(source_path, wanted_ids):
     """
     still_needed = set(wanted_ids)
     result = {}
-    with open_maybe_bz2_read(source_path) as f:
+    with open_maybe_bz2_read(dump_path) as f:
         in_page = False
         page_lines = []
         for line in f:
@@ -294,7 +312,7 @@ def main():
     ap.add_argument('--before', required=True, help='<doc>-formatted extraction output before the change')
     ap.add_argument('--after', required=True, help='<doc>-formatted extraction output after the change')
     ap.add_argument('--templates', required=True, help='Templates file (<page>/<title>/<text> shape)')
-    ap.add_argument('--source', required=True,
+    ap.add_argument('--dump', required=True,
                      help='Original page dump (.xml or .xml.bz2) the documents were extracted from')
     args = ap.parse_args()
 
@@ -333,15 +351,15 @@ def main():
         import wikiextractor.WikiExtractor as we
         we.load_templates(f)
 
-    source_texts = get_source_wikitext_by_id(args.source, changed_ids)
+    source_texts = get_source_wikitext_by_id(args.dump, changed_ids)
     missing_from_source = [doc_id for doc_id in changed_ids if doc_id not in source_texts]
-    print(f"{len(source_texts)} of {len(changed_ids)} changed document id(s) found in --source.",
+    print(f"{len(source_texts)} of {len(changed_ids)} changed document id(s) found in --dump.",
           file=sys.stderr)
     if missing_from_source:
-        print(f"WARNING: {len(missing_from_source)} id(s) NOT found in --source: "
+        print(f"WARNING: {len(missing_from_source)} id(s) NOT found in --dump: "
               f"{', '.join(missing_from_source)}. If you've directly confirmed these ids ARE "
               f"present in your actual dump (e.g. via extract_page_range.py), double-check "
-              f"--source is pointed at that exact file, and not some other, smaller extract "
+              f"--dump is pointed at that exact file, and not some other, smaller extract "
               f"(this is an easy mix-up across a long working session with several similar "
               f"files in play).", file=sys.stderr)
 
@@ -374,7 +392,7 @@ def main():
             marker = '!!' if invoked is not None else '??'
             reason = ("no non-English-keyword redirect was invoked during this article's "
                       "own extraction -- not explained by this mechanism" if invoked is not None
-                      else "doc id not found in --source -- cannot confirm at all")
+                      else "doc id not found in --dump -- cannot confirm at all")
             print(f"[{marker}] Doc {doc_id}: {status}")
             print(f"     {reason}")
         print()
