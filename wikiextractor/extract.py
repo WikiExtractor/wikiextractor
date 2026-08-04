@@ -61,7 +61,7 @@ knownNamespaces = set(['Template'])
 # Extensible: add further confirmed, per-language keywords here as
 # they turn up on other wikis, rather than guessing translations
 # preemptively for languages not yet actually encountered.
-redirectKeywords = ['REDIRECT', 'چوريو']
+redirectKeywords = ['REDIRECT', 'چوريو', 'رجوع_مکرر']
 redirectRE = re.compile(
     r'#(?:%s)\b.*?\[\[([^\]]*)]]' % '|'.join(redirectKeywords),
     re.IGNORECASE)
