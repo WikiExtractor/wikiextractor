@@ -790,7 +790,6 @@ minFileSize = 200 * 1024
 
 def main():
     global acceptedNamespaces
-    global templateCache
 
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -897,10 +896,6 @@ def main():
 
     if not Extractor.keepLinks:
         ignoreTag('a')
-
-    # sharing cache of parser templates is too slow:
-    # manager = Manager()
-    # templateCache = manager.dict()
 
     if args.article:
         if args.templates:

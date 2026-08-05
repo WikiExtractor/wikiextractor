@@ -23,6 +23,7 @@ import html
 import json
 import ast
 import operator
+from functools import lru_cache
 from itertools import zip_longest
 from urllib.parse import quote as urlencode
 from html.entities import name2codepoint
@@ -1300,8 +1301,9 @@ class Template(list):
     A Template is a list of TemplateText or TemplateArgs
     """
 
-    @classmethod
-    def parse(cls, body):
+    @staticmethod
+    @lru_cache(maxsize=10000)
+    def parse(body):
         tpl = Template()
         # we must handle nesting, s.a.
         # {{{1|{{PAGENAME}}}
@@ -1745,13 +1747,8 @@ class Extractor():
             title = redirected
 
         # get the template
-        if title in templateCache:
-            template = templateCache[title]
-        elif title in templates:
+        if title in templates:
             template = Template.parse(templates[title])
-            # add it to cache
-            templateCache[title] = template
-            del templates[title]
         else:
             # The page being included could not be identified
             return ''
@@ -2492,9 +2489,6 @@ reIncludeonly = re.compile(r'<includeonly>|</includeonly>', re.DOTALL)
 # These are built before spawning processes, hence they are shared.
 templates = {}
 redirects = {}
-# cache of parser templates
-# FIXME: sharing this with a Manager slows down.
-templateCache = {}
 
 
 def define_template(title, page):

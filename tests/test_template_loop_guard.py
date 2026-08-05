@@ -49,14 +49,14 @@ import wikiextractor.extract as ex
 
 class TemplateLoopGuardTestCase(unittest.TestCase):
     """Base class that resets wikiextractor's module-level template state
-    before each test. `templates`, `templateCache`, and `redirects` are
+    before each test. `templates` and `redirects` are
     plain module globals in extract.py (populated by define_template),
     so tests must not leak state into one another.
     """
 
     def setUp(self):
         ex.templates.clear()
-        ex.templateCache.clear()
+        ex.Template.parse.cache_clear()
         ex.redirects.clear()
         # Normally set by load_templates() when scanning a real dump's
         # first Template-namespace page; tests define templates directly

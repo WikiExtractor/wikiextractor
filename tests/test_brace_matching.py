@@ -165,7 +165,7 @@ class RecursiveNestingEndToEndTests(unittest.TestCase):
 
     def setUp(self):
         ex.templates.clear()
-        ex.templateCache.clear()
+        ex.Template.parse.cache_clear()
         ex.redirects.clear()
         ex.Extractor.templatePrefix = "Template:"
 
@@ -223,7 +223,7 @@ class RecursiveNestingWeirdCountsEndToEndTests(unittest.TestCase):
 
     def setUp(self):
         ex.templates.clear()
-        ex.templateCache.clear()
+        ex.Template.parse.cache_clear()
         ex.redirects.clear()
         ex.Extractor.templatePrefix = "Template:"
 
@@ -259,7 +259,7 @@ class DynamicTemplateNameEndToEndTests(unittest.TestCase):
 
     def setUp(self):
         ex.templates.clear()
-        ex.templateCache.clear()
+        ex.Template.parse.cache_clear()
         ex.redirects.clear()
         ex.Extractor.templatePrefix = "Template:"
 
