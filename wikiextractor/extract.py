@@ -1302,7 +1302,6 @@ class Template(list):
     """
 
     @staticmethod
-    @lru_cache(maxsize=10000)
     def parse(body):
         tpl = Template()
         # we must handle nesting, s.a.
@@ -1384,12 +1383,17 @@ class TemplateArg():
         #logger.debug('TemplateArg %s', parameter)
 
         parts = splitParts(parameter)
-        self.name = Template.parse(parts[0])
+        self.name = TemplateArg._parse_template(parts[0])
         if len(parts) > 1:
             # This parameter has a default value
-            self.default = Template.parse(parts[1])
+            self.default = TemplateArg._parse_template(parts[1])
         else:
             self.default = None
+
+    @staticmethod
+    @lru_cache(maxsize=10000)
+    def _parse_template(arg):
+        return Template.parse(arg)
 
     def __str__(self):
         if self.default:
@@ -1656,6 +1660,11 @@ class Extractor():
         logger.debug('   templateParams> %s', '|'.join(templateParams.values()))
         return templateParams
 
+    @staticmethod
+    @lru_cache(maxsize=10000)
+    def _parse_template(template):
+        return Template.parse(template)
+
     def expandTemplate(self, body):
         """Expands template invocation.
         :param body: the parts of a template.
@@ -1748,7 +1757,7 @@ class Extractor():
 
         # get the template
         if title in templates:
-            template = Template.parse(templates[title])
+            template = Extractor._parse_template(templates[title])
         else:
             # The page being included could not be identified
             return ''

@@ -204,7 +204,8 @@ class TemplateContaminationTests(unittest.TestCase):
     def setUp(self):
         import wikiextractor.extract as ex
         ex.templates.clear()
-        ex.Template.parse.cache_clear()
+        ex.TemplateArg._parse_template.cache_clear()
+        ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()
 
     def load(self, xml_text):

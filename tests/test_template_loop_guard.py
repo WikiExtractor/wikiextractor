@@ -56,7 +56,8 @@ class TemplateLoopGuardTestCase(unittest.TestCase):
 
     def setUp(self):
         ex.templates.clear()
-        ex.Template.parse.cache_clear()
+        ex.TemplateArg._parse_template.cache_clear()
+        ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()
         # Normally set by load_templates() when scanning a real dump's
         # first Template-namespace page; tests define templates directly
