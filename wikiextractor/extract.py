@@ -1460,26 +1460,25 @@ class Extractor():
         """
         :param page: a list of lines.
         :param templates: the {title: text} template lookup this
-            extraction should use -- a plain dict (the module-level
-            `templates` global, as populated by define_template()) or
-            anything else supporting `in`/`[]`, e.g. a
-            template_blob.CompactedTemplates view. Defaults to the
-            module-level `templates` global when not given, so every
-            existing caller that never passed this explicitly keeps
-            working unchanged -- but a caller that DOES have its own
-            templates view (extract_process(), the --article path)
-            should pass it here rather than reassigning the module
-            global out from under this module, which used to be the
-            only way to swap in a different templates source and
-            left extract.py itself with no visible sign that its own
-            behavior could be changed from outside it.
+            extraction should use -- a plain dict, populated via
+            define_template(), or anything else supporting `in`/`[]`,
+            e.g. a template_blob.CompactedTemplates view. Defaults to
+            a fresh, empty dict when not given -- not to any shared
+            global -- so a caller that doesn't care about templates
+            (most unit tests) simply gets none, isolated from
+            whatever any other caller or test elsewhere in the same
+            process has loaded; there is no longer a module-level
+            `templates` for this to silently depend on. A caller that
+            DOES need real templates (extract_process(), the
+            --article path) passes its own dict or CompactedTemplates
+            view here explicitly.
         """
         self.id = id
         self.revid = revid
         self.url = get_url(urlbase, id)
         self.title = title
         self.page = page
-        self.templates = templates if templates is not None else globals()['templates']
+        self.templates = templates if templates is not None else {}
         self.magicWords = MagicWords()
         self.frame = []
         self.recursion_exceeded_1_errs = 0  # template recursion within expandTemplates()
@@ -2510,17 +2509,26 @@ def callParserFunction(functionName, args, frame):
 reNoinclude = re.compile(r'<noinclude>(?:.*?)</noinclude>\n?', re.DOTALL)
 reIncludeonly = re.compile(r'<includeonly>|</includeonly>', re.DOTALL)
 
-# These are built before spawning processes, hence they are shared.
-templates = {}
+# redirects is still module-level, shared, mutable state -- deferred
+# deliberately, alongside templatePrefix/knownNamespaces/modules, as
+# its own separate piece of work (see define_template()'s own
+# docstring). templates itself no longer lives here: every reader
+# (Extractor) and writer (define_template()) now takes it as an
+# explicit argument instead.
 redirects = {}
 
 
-def define_template(title, page):
+def define_template(title, page, templates):
     """
-    Adds a template defined in the :param page:.
+    Adds a template defined in the :param page: to :param templates:.
+    :param templates: the {title: text} dict to populate -- required,
+        not defaulted, since this function's entire job is writing
+        into it; a silent "if not given, use a throwaway empty dict"
+        default would make a forgotten argument fail silently (the
+        template is "defined" into a dict nobody keeps) rather than
+        loudly, which is worse than just requiring it.
     @see https://en.wikipedia.org/wiki/Help:Template#Noinclude.2C_includeonly.2C_and_onlyinclude
     """
-    global templates
     global redirects
 
     # title = normalizeTitle(title)

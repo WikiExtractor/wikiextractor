@@ -70,7 +70,6 @@ from multiprocessing import Queue, get_context, cpu_count, Value, Condition
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
-from . import extract as ex
 from . import template_blob
 
 # ===========================================================================
@@ -220,17 +219,28 @@ tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*>(?:([^<]*)(<.*?>)?)?')
 #                    1     2               3      4
 
 
-def load_templates(file, output_file=None, encoding='utf-8'):
+def load_templates(file, output_file=None, encoding='utf-8', templates=None):
     """
     Load templates from :param file:.
     :param output_file: file where to save templates and modules.
+    :param templates: the {title: text} dict to populate -- defaults
+        to a fresh, empty dict when not given (matching Extractor's
+        own default), NOT any shared global; there is no longer a
+        module-level `templates` for this function to reach into.
+        A caller that wants access to the populated dict afterward
+        (process_dump(), the --article path, tests) must pass its
+        own dict here explicitly and keep using that same reference
+        -- this function mutates it in place, same as
+        define_template() itself always has, just one level up.
     :return: number of templates loaded.
     """
     global templateNamespace
     global moduleNamespace, modulePrefix
     modulePrefix = moduleNamespace + ':'
+    if templates is None:
+        templates = {}
     articles = 0
-    templates = 0
+    template_count = 0
     page = []
     inText = False
     if output_file:
@@ -279,8 +289,8 @@ def load_templates(file, output_file=None, encoding='utf-8'):
             page.append(line)
         elif tag == '/page':
             if title.startswith(Extractor.templatePrefix):
-                define_template(title, page)
-                templates += 1
+                define_template(title, page, templates)
+                template_count += 1
             # save templates and modules to file
             if output_file and (title.startswith(Extractor.templatePrefix) or
                                 title.startswith(modulePrefix)):
@@ -298,8 +308,8 @@ def load_templates(file, output_file=None, encoding='utf-8'):
                 logging.info("Preprocessed %d pages", articles)
     if output_file:
         output.close()
-        logging.info("Saved %d templates to '%s'", templates, output_file)
-    return templates
+        logging.info("Saved %d templates to '%s'", template_count, output_file)
+    return template_count
 
 
 def decode_open(filename, mode='rt', encoding='utf-8'):
@@ -509,23 +519,24 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     if expand_templates:
         # preprocess
         template_load_start = default_timer()
+        raw_templates = {}
         if template_file and os.path.exists(template_file):
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
             file = decode_open(template_file)
-            templates = load_templates(file)
+            template_count = load_templates(file, templates=raw_templates)
             file.close()
         else:
             if input_file == '-':
                 # can't scan then reset stdin; must error w/ suggestion to specify template_file
                 raise ValueError("to use templates with stdin dump, must supply explicit template-file")
             logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
-            templates = load_templates(input, template_file)
+            template_count = load_templates(input, template_file, templates=raw_templates)
             input.close()
             input = decode_open(input_file)
         template_load_elapsed = default_timer() - template_load_start
-        logging.info("Loaded %d templates in %.1fs", templates, template_load_elapsed)
+        logging.info("Loaded %d templates in %.1fs", template_count, template_load_elapsed)
 
-        # Compact ex.templates (a plain dict, ~900K individual str
+        # Compact raw_templates (a plain dict, ~900K individual str
         # objects at full EN scale) into a shared-memory-backed,
         # read-only view before forking workers. Necessary because
         # fork()'s copy-on-write sharing doesn't actually protect a
@@ -542,16 +553,16 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         # extract_process() below (and to the single-article path in
         # main()), which construct their own CompactedTemplates and
         # pass it directly into each Extractor(..., templates=...) --
-        # not picked up implicitly from a reassigned ex.templates
-        # global, which used to be the only way a worker's template
-        # source got set up, with nothing in extract.py itself
-        # reflecting that its behavior could be changed from outside
-        # it. This process (the mapper) never constructs an Extractor
+        # not picked up implicitly by workers via any shared global --
+        # there is no module-level `templates` in extract.py at all
+        # anymore for that to mean; every reader (Extractor) and
+        # writer (define_template()) takes it as an explicit argument.
+        # This process (the mapper) never constructs an Extractor
         # itself, so it has no need to hold onto the compacted view --
         # just the names, to hand to workers, and the cleanup
         # callback, to release the shared memory once everyone's done.
         compact_start = default_timer()
-        _wrapper, template_blob_names, template_blob_cleanup = template_blob.compact(ex.templates)
+        _wrapper, template_blob_names, template_blob_cleanup = template_blob.compact(raw_templates)
         logging.info("Compacted templates into shared memory in %.1fs",
                      default_timer() - compact_start)
     else:
@@ -962,7 +973,8 @@ def main():
         if args.templates:
             if os.path.exists(args.templates):
                 with decode_open(args.templates) as file:
-                    load_templates(file)
+                    raw_templates = {}
+                    load_templates(file, templates=raw_templates)
                 # Same compaction as process_dump() -- deliberately
                 # not a separate plain-dict path for --article just
                 # because there's no forking here to protect against:
@@ -970,7 +982,7 @@ def main():
                 # and exercising a different templates lookup
                 # mechanism here than what real multiprocess runs use
                 # would defeat that.
-                article_templates, _names, template_blob_cleanup = template_blob.compact(ex.templates)
+                article_templates, _names, template_blob_cleanup = template_blob.compact(raw_templates)
 
         urlbase = ''
         with decode_open(input_file) as input:

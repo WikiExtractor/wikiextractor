@@ -164,7 +164,7 @@ class RecursiveNestingEndToEndTests(unittest.TestCase):
     """
 
     def setUp(self):
-        ex.templates.clear()
+        self.templates = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()
@@ -172,7 +172,7 @@ class RecursiveNestingEndToEndTests(unittest.TestCase):
 
     def get_result(self, article_text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [article_text])
+                               "Test Article", [article_text], templates=self.templates)
         return extractor.clean_text(article_text, expand_templates=True)
 
     def test_six_brace_indirection_the_real_documented_example(self):
@@ -183,12 +183,12 @@ class RecursiveNestingEndToEndTests(unittest.TestCase):
         # "bar". MediaWiki namespaces auto-capitalize the first letter
         # of a title, so the template must be defined as "Template:Ppp"
         # to correctly match a call written as {{ppp|...}}.
-        ex.define_template('Template:Ppp', ['{{{{{{p}}}}}}'])
+        ex.define_template('Template:Ppp', ['{{{{{{p}}}}}}'], self.templates)
         result = self.get_result('{{ppp|p=foo|foo=bar}}')
         self.assertEqual(result, ['bar'])
 
     def test_twelve_brace_fourth_level_indirection_the_real_documented_example(self):
-        ex.define_template('Template:Tvvvv', ['{{{{{{{{{{{{p}}}}}}}}}}}}'])
+        ex.define_template('Template:Tvvvv', ['{{{{{{{{{{{{p}}}}}}}}}}}}'], self.templates)
         result = self.get_result('{{tvvvv|p=alpha|alpha=beta|beta=gamma|gamma=delta}}')
         self.assertEqual(result, ['delta'])
 
@@ -223,7 +223,7 @@ class RecursiveNestingWeirdCountsEndToEndTests(unittest.TestCase):
     """
 
     def setUp(self):
-        ex.templates.clear()
+        self.templates = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()
@@ -231,14 +231,14 @@ class RecursiveNestingWeirdCountsEndToEndTests(unittest.TestCase):
 
     def get_result(self, article_text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [article_text])
+                               "Test Article", [article_text], templates=self.templates)
         return extractor.clean_text(article_text, expand_templates=True)
 
     def test_seven_braces_stray_literal_brace_survives_around_resolved_value(self):
         # 7 = 2*3 + 1: two nested tplarg levels, wrapped in one leftover,
         # literal stray '{'/'}' on each side (not a valid delimiter of
         # any kind, so it just survives as plain text).
-        ex.define_template('Template:Seven', ['X{{{{{{{p}}}}}}}X'])
+        ex.define_template('Template:Seven', ['X{{{{{{{p}}}}}}}X'], self.templates)
         result = self.get_result('{{seven|p=foo|foo=bar}}')
         self.assertEqual(result, ['X{bar}X'])
 
@@ -246,8 +246,8 @@ class RecursiveNestingWeirdCountsEndToEndTests(unittest.TestCase):
         # 8 = 2*3 + 2: two nested tplarg levels resolve to a value that
         # itself becomes the NAME of a real, outer, dynamically-named
         # 2-brace template call.
-        ex.define_template('Template:Eight', ['{{{{{{{{p}}}}}}}}'])
-        ex.define_template('Template:Bar', ['outer template content'])
+        ex.define_template('Template:Eight', ['{{{{{{{{p}}}}}}}}'], self.templates)
+        ex.define_template('Template:Bar', ['outer template content'], self.templates)
         result = self.get_result('{{eight|p=foo|foo=Bar}}')
         self.assertEqual(result, ['outer template content'])
 
@@ -260,7 +260,7 @@ class DynamicTemplateNameEndToEndTests(unittest.TestCase):
     """
 
     def setUp(self):
-        ex.templates.clear()
+        self.templates = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()
@@ -268,12 +268,12 @@ class DynamicTemplateNameEndToEndTests(unittest.TestCase):
 
     def get_result(self, article_text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [article_text])
+                               "Test Article", [article_text], templates=self.templates)
         return extractor.clean_text(article_text, expand_templates=True)
 
     def test_dynamic_template_name_call_resolves_correctly(self):
-        ex.define_template('Template:Wrapper', ['{{{{{1}}}}}'])
-        ex.define_template('Template:Target', ['the real target content'])
+        ex.define_template('Template:Wrapper', ['{{{{{1}}}}}'], self.templates)
+        ex.define_template('Template:Target', ['the real target content'], self.templates)
         text = 'before {{Wrapper|Target}} after'
         result = self.get_result(text)
         self.assertEqual(result, ['before the real target content after'])
@@ -282,9 +282,8 @@ class DynamicTemplateNameEndToEndTests(unittest.TestCase):
         # Matches the real case this was found on: a conditional
         # wrapper that dynamically calls whatever template name was
         # passed, or falls back to plain text if no parameter was given.
-        ex.define_template('Template:Wrapper',
-                            ['{{#if:{{{1|}}}|{{{{{1}}}}}|no param given}}'])
-        ex.define_template('Template:StubNotice', ['This article is a stub.'])
+        ex.define_template('Template:Wrapper', ['{{#if:{{{1|}}}|{{{{{1}}}}}|no param given}}'], self.templates)
+        ex.define_template('Template:StubNotice', ['This article is a stub.'], self.templates)
 
         with_param = self.get_result('x {{Wrapper|StubNotice}} y')
         self.assertEqual(with_param, ['x This article is a stub. y'])
@@ -296,9 +295,9 @@ class DynamicTemplateNameEndToEndTests(unittest.TestCase):
         # The specific, confirmed failure mode: before the fix, this
         # dynamic call was misinterpreted as a direct call to a
         # template literally named "1".
-        ex.define_template('Template:1', ['WRONG -- this should never be reached'])
-        ex.define_template('Template:Wrapper', ['{{{{{1}}}}}'])
-        ex.define_template('Template:Target', ['correct content'])
+        ex.define_template('Template:1', ['WRONG -- this should never be reached'], self.templates)
+        ex.define_template('Template:Wrapper', ['{{{{{1}}}}}'], self.templates)
+        ex.define_template('Template:Target', ['correct content'], self.templates)
         text = '{{Wrapper|Target}}'
         result = self.get_result(text)
         self.assertEqual(result, ['correct content'])

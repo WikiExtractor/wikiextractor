@@ -188,7 +188,7 @@ def collect_doc_ids(path, verbose_label):
     return ids
 
 
-def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None):
+def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None, templates=None):
     """
     Stream through the original XML dump looking for <page> blocks whose
     page id is in target_ids. Returns {id: info_dict} where info_dict has
@@ -240,7 +240,7 @@ def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None):
                 if '</page>' in line:
                     in_page = False
                     if page_id in remaining:
-                        results[page_id] = _parse_page_block(''.join(page_lines), ex_module)
+                        results[page_id] = _parse_page_block(''.join(page_lines), ex_module, templates)
                         remaining.discard(page_id)
                         pbar.set_postfix(found=f"{len(results)}/{total_targets}")
                     page_lines = []
@@ -250,7 +250,7 @@ def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None):
     return results, remaining
 
 
-def _parse_page_block(block, ex_module=None):
+def _parse_page_block(block, ex_module=None, templates=None):
     title_m = TITLE_RE.search(block)
     title = title_m.group(1) if title_m else ''
     has_redirect = bool(REDIRECT_TAG_RE.search(block))
@@ -290,7 +290,7 @@ def _parse_page_block(block, ex_module=None):
         try:
             extractor = ex_module.Extractor(
                 page_id, page_id, f"https://example.org/wiki?curid={page_id}",
-                title, [stripped])
+                title, [stripped], templates=templates)
             # Run on the full page text, redirect line included, to
             # exactly mirror what the real extraction pipeline does in
             # Extractor.extract() -- not just the trailing portion in
@@ -361,14 +361,16 @@ def main():
     args = ap.parse_args()
 
     ex_module = None
+    templates = None
     if not args.no_extraction_check:
         try:
             import wikiextractor.extract as ex_module
             if args.templates:
                 import wikiextractor.WikiExtractor as we
                 print(f"Loading templates from {args.templates}...", file=sys.stderr)
+                templates = {}
                 with we.decode_open(args.templates) as f:
-                    count = we.load_templates(f)
+                    count = we.load_templates(f, templates=templates)
                 print(f"Loaded {count} templates.", file=sys.stderr)
         except ImportError as e:
             print(f"warning: --no-extraction-check was not given, but wikiextractor isn't "
@@ -391,7 +393,7 @@ def main():
 
     dump_info, not_found = scan_dump_for_ids(args.dump, missing,
                                               early_exit=not args.no_early_exit,
-                                              ex_module=ex_module)
+                                              ex_module=ex_module, templates=templates)
 
     rows = []
     counts = {}

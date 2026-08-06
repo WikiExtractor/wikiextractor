@@ -208,31 +208,32 @@ class RecordingDict(dict):
         return super().get(key, default)
 
 
-def find_redirect_templates_invoked(ex, page_id, wikitext, non_english_redirect_titles):
+def find_redirect_templates_invoked(ex, page_id, wikitext, non_english_redirect_titles, templates):
     """
     Runs the real clean_text() on wikitext, instrumented to record
     every template title looked up, then returns the subset of those
     that are known (from --templates) to be redirects using one of
     the newly-recognized, non-English keywords -- genuine, per-article
     confirmation, not a file-wide pattern match.
+
+    templates: the real {title: text} dict, as populated by
+    load_templates() in main() -- wrapped fresh here each call rather
+    than mutating any shared global (there is no longer a module-level
+    `templates` in extract.py to save/swap/restore around this call at
+    all; the caller's own dict is untouched by the wrapping itself).
     """
     looked_up = set()
-    original_templates = ex.templates
-    original_cache = ex.templateCache
     original_redirects = ex.redirects
     try:
-        ex.templates = RecordingDict(ex.templates, looked_up.add)
-        ex.templateCache = RecordingDict(ex.templateCache, looked_up.add)
+        wrapped_templates = RecordingDict(templates, looked_up.add)
         ex.redirects = RecordingDict(ex.redirects, looked_up.add)
         extractor = ex.Extractor(page_id, page_id, f"https://example.org/wiki?curid={page_id}",
-                                  f"Page{page_id}", [wikitext])
+                                  f"Page{page_id}", [wikitext], templates=wrapped_templates)
         try:
             extractor.clean_text(wikitext, expand_templates=True)
         except Exception:
             pass  # a page that can't finish expanding still reveals what it looked up first
     finally:
-        ex.templates = original_templates
-        ex.templateCache = original_cache
         ex.redirects = original_redirects
     return looked_up & non_english_redirect_titles
 
@@ -347,9 +348,10 @@ def main():
           file=sys.stderr)
 
     print("Loading templates into the real extract.py machinery...", file=sys.stderr)
+    templates = {}
     with open(args.templates, encoding='utf-8', errors='replace') as f:
         import wikiextractor.WikiExtractor as we
-        we.load_templates(f)
+        we.load_templates(f, templates=templates)
 
     source_texts = get_source_wikitext_by_id(args.dump, changed_ids)
     missing_from_source = [doc_id for doc_id in changed_ids if doc_id not in source_texts]
@@ -378,7 +380,7 @@ def main():
 
         if doc_id in source_texts:
             invoked = find_redirect_templates_invoked(
-                ex, doc_id, source_texts[doc_id], non_english_redirect_titles)
+                ex, doc_id, source_texts[doc_id], non_english_redirect_titles, templates)
         else:
             invoked = None
 

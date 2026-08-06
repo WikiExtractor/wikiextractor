@@ -45,7 +45,6 @@ import wikiextractor.extract as ex
 class SlashInAttributeTestCase(unittest.TestCase):
 
     def setUp(self):
-        ex.templates.clear()
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()

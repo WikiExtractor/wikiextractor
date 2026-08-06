@@ -74,7 +74,6 @@ class LoadTemplatesOutputFileWhitespaceTests(unittest.TestCase):
     def setUp(self):
         we.templateNamespace = ''
         ex.Extractor.templatePrefix = ''
-        ex.templates = {}
         ex.redirects.clear()
         self._tmpdir = tempfile.mkdtemp()
         self.addCleanup(self._cleanup_tmpdir)
@@ -140,7 +139,6 @@ class LoadTemplatesOutputFileWhitespaceTests(unittest.TestCase):
         with open(roundtrip_path, 'w', encoding='utf-8') as f:
             f.write(output)
 
-        ex.templates = {}
         we.templateNamespace = ''
         ex.Extractor.templatePrefix = ''
         with we.decode_open(roundtrip_path) as f:
@@ -154,11 +152,13 @@ class LoadTemplatesOutputFileWhitespaceTests(unittest.TestCase):
                     ex.Extractor.templatePrefix = we.templateNamespace + ':'
                 elif tag == '/siteinfo':
                     break
+        roundtrip_templates = {}
         with we.decode_open(roundtrip_path) as f:
-            we.load_templates(f)
+            we.load_templates(f, templates=roundtrip_templates)
 
         wikitext = '{{Wrapper|value}}'
-        extractor = ex.Extractor(1, '1', 'https://x', 'Test', [wikitext])
+        extractor = ex.Extractor(1, '1', 'https://x', 'Test', [wikitext],
+                                  templates=roundtrip_templates)
         result = extractor.clean_text(wikitext, expand_templates=True)
         self.assertEqual(result, ['wrapped[value]'])
 

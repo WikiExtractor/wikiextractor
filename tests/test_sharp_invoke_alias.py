@@ -58,7 +58,7 @@ import wikiextractor.extract as ex
 class SharpInvokeAliasTestCase(unittest.TestCase):
 
     def setUp(self):
-        ex.templates.clear()
+        self.templates = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()
@@ -73,7 +73,7 @@ class SharpInvokeAliasTestCase(unittest.TestCase):
 
     def get_result(self, article_text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [article_text])
+                               "Test Article", [article_text], templates=self.templates)
         return extractor.clean_text(article_text, expand_templates=True)
 
 
@@ -89,7 +89,7 @@ class AliasTemplateNameTests(SharpInvokeAliasTestCase):
         # function name "convert") happened to coincide with the
         # template's actual name. Included as a baseline, not as the
         # regression test itself.
-        ex.define_template('Template:Convert', ['{{#invoke:convert|convert}}'])
+        ex.define_template('Template:Convert', ['{{#invoke:convert|convert}}'], self.templates)
         result = self.get_result('Value: {{convert|5|km}}')
         self.assertEqual(result, ['Value: 5 km'])
 
@@ -101,14 +101,14 @@ class AliasTemplateNameTests(SharpInvokeAliasTestCase):
         # "Template:Cvt" -- silently failing to empty output every
         # time, regardless of the underlying function being identical
         # and correctly registered.
-        ex.define_template('Template:Cvt', ['{{#invoke:convert|convert}}'])
+        ex.define_template('Template:Cvt', ['{{#invoke:convert|convert}}'], self.templates)
         result = self.get_result('Value: {{cvt|5|km}}')
         self.assertEqual(result, ['Value: 5 km'])
 
     def test_original_buffalo_sentence(self):
         # The exact real-world sentence that surfaced this whole
         # investigation.
-        ex.define_template('Template:Cvt', ['{{#invoke:convert|convert}}'])
+        ex.define_template('Template:Cvt', ['{{#invoke:convert|convert}}'], self.templates)
         text = ("Buffalo's lowest recorded temperature was {{cvt|−20|°F|0}}, "
                  "which occurred twice: on February 9, 1934, and February 2, 1961.")
         result = self.get_result(text)
@@ -121,9 +121,9 @@ class AliasTemplateNameTests(SharpInvokeAliasTestCase):
         # Not special-cased to "cvt" specifically -- any number of
         # differently-named templates invoking the same function
         # should all work identically.
-        ex.define_template('Template:Convert', ['{{#invoke:convert|convert}}'])
-        ex.define_template('Template:Cvt', ['{{#invoke:convert|convert}}'])
-        ex.define_template('Template:Convert2', ['{{#invoke:convert|convert}}'])
+        ex.define_template('Template:Convert', ['{{#invoke:convert|convert}}'], self.templates)
+        ex.define_template('Template:Cvt', ['{{#invoke:convert|convert}}'], self.templates)
+        ex.define_template('Template:Convert2', ['{{#invoke:convert|convert}}'], self.templates)
         for name in ('convert', 'cvt', 'convert2'):
             with self.subTest(template=name):
                 result = self.get_result(f'Value: {{{{{name}|5|km}}}}')
@@ -142,8 +142,8 @@ class FrameStackOrderingTests(SharpInvokeAliasTestCase):
         # itself call #invoke -- it calls Cvt, which does. The
         # #invoke call must pick up Cvt's own params (5, km), not
         # Wrapper's (999, mi).
-        ex.define_template('Template:Cvt', ['{{#invoke:convert|convert}}'])
-        ex.define_template('Template:Wrapper', ['See: {{cvt|{{{1}}}|{{{2}}}}}'])
+        ex.define_template('Template:Cvt', ['{{#invoke:convert|convert}}'], self.templates)
+        ex.define_template('Template:Wrapper', ['See: {{cvt|{{{1}}}|{{{2}}}}}'], self.templates)
         result = self.get_result('Value: {{wrapper|5|km}}')
         self.assertEqual(result, ['Value: See: 5 km'])
 

@@ -40,7 +40,7 @@ import wikiextractor.extract as ex
 class FrameCleanupOnExceptionTestCase(unittest.TestCase):
 
     def setUp(self):
-        ex.templates.clear()
+        self.templates = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()
@@ -48,7 +48,7 @@ class FrameCleanupOnExceptionTestCase(unittest.TestCase):
 
     def get_extractor(self, article_text):
         return Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                          "Test Article", [article_text])
+                          "Test Article", [article_text], templates=self.templates)
 
 
 class FrameStaysCleanAfterExceptionTests(FrameCleanupOnExceptionTestCase):
@@ -59,7 +59,7 @@ class FrameStaysCleanAfterExceptionTests(FrameCleanupOnExceptionTestCase):
         # expandTemplates() that isn't a #invoke-specific failure
         # (those are already caught locally by callParserFunction's
         # own bare except, before ever reaching this append/pop pair).
-        ex.define_template('Template:Poison', ['poisoned body'])
+        ex.define_template('Template:Poison', ['poisoned body'], self.templates)
 
         extractor = self.get_extractor('Before {{Poison}} after')
 
@@ -93,8 +93,8 @@ class FrameStaysCleanAfterExceptionTests(FrameCleanupOnExceptionTestCase):
         # an exception and continues on the same Extractor instance --
         # not true today, but this is what the fix actually protects
         # against.
-        ex.define_template('Template:Poison', ['poisoned body'])
-        ex.define_template('Template:Fine', ['fine body'])
+        ex.define_template('Template:Poison', ['poisoned body'], self.templates)
+        ex.define_template('Template:Fine', ['fine body'], self.templates)
 
         extractor = self.get_extractor('x')
         original_expand_templates = extractor.expandTemplates

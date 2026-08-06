@@ -202,8 +202,8 @@ class TemplateContaminationTests(unittest.TestCase):
     """
 
     def setUp(self):
+        self.templates = {}
         import wikiextractor.extract as ex
-        ex.templates.clear()
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         ex.redirects.clear()
@@ -211,10 +211,9 @@ class TemplateContaminationTests(unittest.TestCase):
     def load(self, xml_text):
         import io
         import wikiextractor.WikiExtractor as we
-        we.load_templates(io.StringIO(xml_text))
+        we.load_templates(io.StringIO(xml_text), templates=self.templates)
 
     def test_template_after_blanked_template_is_not_contaminated(self):
-        import wikiextractor.extract as ex
         xml = '''<mediawiki>
   <page>
     <title>Template:Blanked</title>
@@ -239,9 +238,9 @@ class TemplateContaminationTests(unittest.TestCase):
   </page>
 </mediawiki>'''
         self.load(xml)
-        self.assertNotIn('Template:Blanked', ex.templates)
-        self.assertIn('Template:Infobox person', ex.templates)
-        content = ex.templates['Template:Infobox person']
+        self.assertNotIn('Template:Blanked', self.templates)
+        self.assertIn('Template:Infobox person', self.templates)
+        content = self.templates['Template:Infobox person']
         self.assertNotIn('<contributor>', content)
         self.assertNotIn('SomeEditor', content)
         self.assertEqual(content, 'The real infobox content for {{{name}}}.')
@@ -256,10 +255,10 @@ class TemplateContaminationTests(unittest.TestCase):
         # it got there.
         import wikiextractor.extract as ex
         try:
-            ex.define_template('Template:Blanked', [])
+            ex.define_template('Template:Blanked', [], self.templates)
         except IndexError:
             self.fail("define_template() crashed on a genuinely empty page list")
-        self.assertNotIn('Template:Blanked', ex.templates)
+        self.assertNotIn('Template:Blanked', self.templates)
         self.assertNotIn('Template:Blanked', ex.redirects)
 
 
