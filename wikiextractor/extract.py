@@ -1456,15 +1456,30 @@ class Extractor():
     # Obtained from TemplateNamespace
     templatePrefix = ''
 
-    def __init__(self, id, revid, urlbase, title, page):
+    def __init__(self, id, revid, urlbase, title, page, templates=None):
         """
         :param page: a list of lines.
+        :param templates: the {title: text} template lookup this
+            extraction should use -- a plain dict (the module-level
+            `templates` global, as populated by define_template()) or
+            anything else supporting `in`/`[]`, e.g. a
+            template_blob.CompactedTemplates view. Defaults to the
+            module-level `templates` global when not given, so every
+            existing caller that never passed this explicitly keeps
+            working unchanged -- but a caller that DOES have its own
+            templates view (extract_process(), the --article path)
+            should pass it here rather than reassigning the module
+            global out from under this module, which used to be the
+            only way to swap in a different templates source and
+            left extract.py itself with no visible sign that its own
+            behavior could be changed from outside it.
         """
         self.id = id
         self.revid = revid
         self.url = get_url(urlbase, id)
         self.title = title
         self.page = page
+        self.templates = templates if templates is not None else globals()['templates']
         self.magicWords = MagicWords()
         self.frame = []
         self.recursion_exceeded_1_errs = 0  # template recursion within expandTemplates()
@@ -1756,8 +1771,8 @@ class Extractor():
             title = redirected
 
         # get the template
-        if title in templates:
-            template = Extractor._parse_template(templates[title])
+        if title in self.templates:
+            template = Extractor._parse_template(self.templates[title])
         else:
             # The page being included could not be identified
             return ''

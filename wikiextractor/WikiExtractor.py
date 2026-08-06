@@ -70,6 +70,8 @@ from multiprocessing import Queue, get_context, cpu_count, Value, Condition
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
+from . import extract as ex
+from . import template_blob
 
 # ===========================================================================
 
@@ -523,6 +525,39 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         template_load_elapsed = default_timer() - template_load_start
         logging.info("Loaded %d templates in %.1fs", templates, template_load_elapsed)
 
+        # Compact ex.templates (a plain dict, ~900K individual str
+        # objects at full EN scale) into a shared-memory-backed,
+        # read-only view before forking workers. Necessary because
+        # fork()'s copy-on-write sharing doesn't actually protect a
+        # dict of Python objects the way it looks like it should --
+        # every *read* (even `title in templates`) bumps the touched
+        # object's own refcount, which is a write at the memory level,
+        # so a worker doing nothing but ordinary template lookups
+        # still ends up silently, irreversibly privatizing large
+        # fractions of the dict's pages over its lifetime. See
+        # template_blob.py's own module docstring for the full
+        # reasoning and the production measurements that confirmed it.
+        #
+        # template_blob_names gets threaded through explicitly to
+        # extract_process() below (and to the single-article path in
+        # main()), which construct their own CompactedTemplates and
+        # pass it directly into each Extractor(..., templates=...) --
+        # not picked up implicitly from a reassigned ex.templates
+        # global, which used to be the only way a worker's template
+        # source got set up, with nothing in extract.py itself
+        # reflecting that its behavior could be changed from outside
+        # it. This process (the mapper) never constructs an Extractor
+        # itself, so it has no need to hold onto the compacted view --
+        # just the names, to hand to workers, and the cleanup
+        # callback, to release the shared memory once everyone's done.
+        compact_start = default_timer()
+        _wrapper, template_blob_names, template_blob_cleanup = template_blob.compact(ex.templates)
+        logging.info("Compacted templates into shared memory in %.1fs",
+                     default_timer() - compact_start)
+    else:
+        template_blob_names = None
+        template_blob_cleanup = None
+
     # process pages
     logging.info("Starting page extraction from %s.", input_file)
     extract_start = default_timer()
@@ -577,7 +612,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, html_safe, debug_map_reduce))
+                            args=(jobs_queue, output_queue, html_safe, debug_map_reduce,
+                                  template_blob_names))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
@@ -629,6 +665,13 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     if watchdog_thread is not None:
         watchdog_thread.join(timeout=5)
 
+    # Every worker and the reducer have now exited (w.join()/reduce.join()
+    # above already waited for that) -- safe to release the shared
+    # memory for good. template_blob_cleanup is None when extraction
+    # ran with --no-templates, since nothing was ever compacted.
+    if template_blob_cleanup is not None:
+        template_blob_cleanup()
+
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
     logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
@@ -639,7 +682,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False):
+def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False, template_blob_names=None):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
@@ -656,8 +699,24 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False)
         PAGE_START line -- that's exactly the page it's stuck on, with
         no need to infer it from surrounding pages or wait to see
         whether it was "just slow".
+    :param template_blob_names: names of the shared-memory segments
+        built by template_blob.compact() in process_dump(), or None
+        if extraction is running with --no-templates. Attached here,
+        once, at worker startup, and the resulting view passed
+        explicitly into every Extractor(...) constructed below --
+        not assigned to the extract module's own `templates` global,
+        which used to be how a worker's template source got set up.
+        Passing it as a constructor argument means extract.py's own
+        behavior is visible in extract.py itself (Extractor takes a
+        templates argument) rather than being silently swappable only
+        from here; it's also what's actually required once this
+        worker starts being launched via spawn instead of fork, which
+        inherits nothing implicitly at all -- doing it this way now
+        means extract_process()'s own body doesn't need to change
+        shape later for that transition.
     """
     configure_mapreduce_logging(debug_map_reduce)
+    worker_templates = template_blob.attach(template_blob_names) if template_blob_names is not None else None
     while True:
         job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
         if job:
@@ -666,7 +725,7 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False)
             mapreduce_logger.debug("PAGE_START pid=%d ordinal=%d id=%s title=%r",
                                    os.getpid(), ordinal, page_id, title)
             out = StringIO()  # memory buffer
-            Extractor(*job[:-1]).extract(out, html_safe)  # (id, urlbase, title, page)
+            Extractor(*job[:-1], templates=worker_templates).extract(out, html_safe)  # (id, urlbase, title, page)
             finish = time.time()
             mapreduce_logger.debug(
                 "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r elapsed=%.2fs",
@@ -898,15 +957,29 @@ def main():
         ignoreTag('a')
 
     if args.article:
+        template_blob_cleanup = None
+        article_templates = None
         if args.templates:
             if os.path.exists(args.templates):
                 with decode_open(args.templates) as file:
                     load_templates(file)
+                # Same compaction as process_dump() -- deliberately
+                # not a separate plain-dict path for --article just
+                # because there's no forking here to protect against:
+                # --article exists partly to validate real behavior,
+                # and exercising a different templates lookup
+                # mechanism here than what real multiprocess runs use
+                # would defeat that.
+                article_templates, _names, template_blob_cleanup = template_blob.compact(ex.templates)
 
         urlbase = ''
         with decode_open(input_file) as input:
             for id, revid, title, page in collect_pages(input):
-                Extractor(id, revid, urlbase, title, page).extract(sys.stdout)
+                Extractor(id, revid, urlbase, title, page,
+                          templates=article_templates).extract(sys.stdout)
+
+        if template_blob_cleanup is not None:
+            template_blob_cleanup()
         return
 
     output_path = args.output
