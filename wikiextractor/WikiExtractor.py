@@ -288,7 +288,7 @@ def load_templates(file, output_file=None, encoding='utf-8'):
                 output.write('   <text>')
                 for line in page:
                     output.write(line)
-                output.write('   </text>\n')
+                output.write('</text>\n')
                 output.write('</page>\n')
             page = []
             articles += 1
