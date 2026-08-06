@@ -67,6 +67,7 @@ import threading
 import time
 from io import StringIO
 from multiprocessing import Queue, get_context, cpu_count, Value, Condition
+from multiprocessing.connection import wait as mp_wait
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
@@ -426,22 +427,76 @@ def get_memory_usage_mb(pid):
     return None
 
 
+def maintain_worker_pool(workers, jobs_queue, output_queue, html_safe, debug_map_reduce,
+                         max_tasks_per_worker, process_ctor):
+    """
+    Replaces any worker no longer alive, keeping the pool at its
+    original size (len(workers) IS the target size -- this only ever
+    removes and re-adds, never changes the count). Call this from the
+    main thread only, periodically, for as long as workers might still
+    have outstanding or future work -- see process_dump(), which calls
+    it both during the mapper loop (while still dispatching) and while
+    waiting for already-dispatched work to finish (workers can still
+    retire and need replacing after dispatch itself is done).
+
+    Deliberately plain, synchronous main-thread logic rather than a
+    background thread: this is core correctness (an OOM-killed or
+    voluntarily-retired worker's replacement should never depend on
+    whether diagnostic logging happens to be enabled), so it needs to
+    keep working the same way regardless of --debug_map_reduce. A worker
+    can exit either because it voluntarily retired after
+    max_tasks_per_worker jobs (see extract_process() -- the intended
+    way to bound how much memory any one worker process can accumulate
+    over its lifetime, since some of that accumulation, e.g.
+    reference-counting defeating copy-on-write on large shared data
+    inherited from the parent, can't be freed from within a
+    still-running process at all, only by starting a fresh one) or
+    because it crashed. Either way, a worker retires/dies strictly
+    BETWEEN jobs, never mid-job (extract_process only checks the task
+    count after fully finishing and submitting one), so no job is ever
+    lost here and nothing needs to be re-queued.
+    :param process_ctor: the Process constructor to use for spawning
+        replacements -- process_dump()'s own local
+        `Process = get_context("fork").Process`.
+    """
+    for i, w in enumerate(workers):
+        if w.is_alive():
+            continue
+        logging.info("WORKER_REPLACED pid=%d no longer alive -- "
+                     "spawning a replacement worker", w.pid)
+        replacement = process_ctor(
+            target=extract_process,
+            args=(jobs_queue, output_queue, html_safe, debug_map_reduce, max_tasks_per_worker))
+        replacement.daemon = True
+        replacement.start()
+        workers[i] = replacement
+
+
 def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interval=60):
     """
-    Periodically logs queue depths, process liveness, and memory usage,
-    so a stalled run can be diagnosed even during long stretches with
-    no per-page activity to log at all -- e.g. the mapper itself
-    blocked on jobs_queue.put() because no worker is consuming, or
-    reduce_process having been killed outright (an OOM kill, for
-    instance, leaves no trace in the per-page logging at all: see the
-    REDUCER_EXIT docstring in reduce_process() for why -- SIGKILL
-    allows no Python-level cleanup, not even that). is_alive() queries
-    actual OS process state directly, rather than inferring it from
-    log silence. reduce_process's own memory usage is tracked
-    specifically because that's where ordering_buffer lives -- an
-    unbounded, growing figure there right up until it disappears
+    Purely diagnostic: periodically logs queue depths, process
+    liveness, and memory usage, so a stalled run can be diagnosed even
+    during long stretches with no per-page activity to log at all --
+    e.g. the mapper itself blocked on jobs_queue.put() because no
+    worker is consuming, or reduce_process having been killed outright
+    (an OOM kill, for instance, leaves no trace in the per-page
+    logging at all: see the REDUCER_EXIT docstring in reduce_process()
+    for why -- SIGKILL allows no Python-level cleanup, not even that).
+    is_alive() queries actual OS process state directly, rather than
+    inferring it from log silence. reduce_process's own memory usage
+    is tracked specifically because that's where ordering_buffer lives
+    -- an unbounded, growing figure there right up until it disappears
     (rather than a REDUCER_EXIT line) is direct, rather than inferred,
     evidence of an OOM kill.
+
+    This is entirely optional and read-only: it never spawns
+    replacement workers itself (see maintain_worker_pool(), called
+    from the main thread, which is what actually keeps the pool at
+    full size -- core correctness that must not depend on whether this
+    thread happens to be running at all). It only reads `workers`,
+    never writes it, so no lock is needed here even though the main
+    thread can be concurrently modifying that same list elsewhere --
+    at worst this logs a momentarily-stale count, never a corruption.
     :param interval: seconds between checks.
     """
     while not stop_event.wait(interval):
@@ -459,7 +514,7 @@ def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interva
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe, expand_templates=True, debug_map_reduce=False):
+                 process_count, html_safe, expand_templates=True, debug_map_reduce=False, max_tasks_per_worker=None):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -472,6 +527,10 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param debug_map_reduce: enables mapreduce_logger's DEBUG-level
         messages (see configure_mapreduce_logging()) -- per-page
         timing, queue dispatch, reducer progress, watchdog status.
+    :param max_tasks_per_worker: if set, workers voluntarily retire and
+        get replaced after completing this many pages each, bounding
+        how much memory any one worker process can accumulate over a
+        long run. None means no limit.
     """
     global knownNamespaces
     global templateNamespace
@@ -577,11 +636,15 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, html_safe, debug_map_reduce))
+                            args=(jobs_queue, output_queue, html_safe, debug_map_reduce, max_tasks_per_worker))
         extractor.daemon = True  # only live while parent process lives
-        extractor.start()
         workers.append(extractor)
+        extractor.start()
 
+    # Purely optional and diagnostic-only: unlike keeping the worker
+    # pool at full size (below, which is core correctness and must not
+    # depend on any flag), this thread only logs status -- it never
+    # spawns anything itself. See watchdog()'s own docstring.
     watchdog_stop = threading.Event()
     watchdog_thread = None
     if mapreduce_logger.isEnabledFor(logging.DEBUG):
@@ -602,10 +665,33 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # proportional to process_count.
     for id, revid, title, page in collect_pages(input):
         while ordinal - next_ordinal_shared.value > maxsize:
+            # Keep maintaining the pool even while throttled here --
+            # previously this only ran after the throttle cleared, so
+            # a worker dying or retiring during a long throttle wait
+            # wouldn't get replaced until progress resumed anyway.
+            maintain_worker_pool(workers, jobs_queue, output_queue, html_safe, debug_map_reduce,
+                                 max_tasks_per_worker, Process)
             # progress_condition is notified by reduce_process every
             # time next_ordinal_shared actually advances (see there),
+            # so this wakes up on that specific event rather than
+            # polling the value on a fixed interval regardless of
+            # whether anything happened. The timeout is only a
+            # fallback for rechecking worker liveness in the (rarer)
+            # case where nothing has been written in a while.
             with progress_condition:
                 progress_condition.wait(timeout=1.0)
+        # Keeping the pool at full size is done directly here, in the
+        # main thread, on every iteration -- not in a background
+        # thread gated behind --debug_map_reduce. A worker that voluntarily
+        # retires (or crashes) needs its replacement regardless of
+        # whether diagnostic logging happens to be enabled; tying that
+        # to an optional debugging feature would be a strange
+        # dependency for core correctness to have. is_alive() is cheap,
+        # and process_count is small enough that checking every worker
+        # every iteration is negligible next to the actual extraction
+        # work being done per page.
+        maintain_worker_pool(workers, jobs_queue, output_queue, html_safe, debug_map_reduce,
+                             max_tasks_per_worker, Process)
         job = (id, revid, urlbase, title, page, ordinal)
         jobs_queue.put(job)  # goes to any available extract_process
         mapreduce_logger.debug("JOB_QUEUED ordinal=%d id=%s title=%r", ordinal, id, title)
@@ -613,11 +699,41 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
     input.close()
 
+    # Keep maintaining the pool after dispatch itself is done, too:
+    # workers can still retire (or crash) while working through
+    # whatever's left in jobs_queue, even though the mapper loop above
+    # has already finished handing everything out. Confirmed directly
+    # that skipping this is a real bug, not just a theoretical
+    # concern: the loop above can finish dispatching almost instantly
+    # (whenever jobs comfortably fit in jobs_queue's own capacity),
+    # long before workers have processed them or had any chance to
+    # retire -- stopping pool maintenance at that point let jobs still
+    # sitting in jobs_queue go silently unprocessed, since w.join() on
+    # an already-exited process returns immediately regardless of why
+    # it exited, letting the run appear to "complete" regardless.
+    #
+    # mp_wait() blocks until a worker's sentinel actually becomes
+    # ready (that worker has exited) -- confirmed directly this reacts
+    # the moment a process exits, not on some fixed polling interval.
+    # next_ordinal_shared itself has no equivalent wakeup event (it's
+    # a plain integer, not something reduce_process can signal a
+    # change on without adding a Condition it would need to notify on
+    # every single write -- more invasive than justified here), so a
+    # short timeout is still used, but only as a fallback specifically
+    # to recheck that one value, not as a general polling interval for
+    # everything.
+    while next_ordinal_shared.value < ordinal:
+        maintain_worker_pool(workers, jobs_queue, output_queue, html_safe, debug_map_reduce,
+                             max_tasks_per_worker, Process)
+        mp_wait([w.sentinel for w in workers], timeout=1.0)
+
+    current_workers = list(workers)
+
     # signal termination
-    for _ in workers:
+    for _ in current_workers:
         jobs_queue.put(None)
     # wait for workers to terminate
-    for w in workers:
+    for w in current_workers:
         w.join()
 
     # signal end of work to reduce process
@@ -625,9 +741,13 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # wait for it to finish
     reduce.join()
 
+    # Safe to stop here rather than before the sentinels above: unlike
+    # the earlier design, this thread is purely diagnostic now and
+    # never spawns anything, so nothing depends on it having stopped
+    # by any particular point in the shutdown sequence.
     watchdog_stop.set()
     if watchdog_thread is not None:
-        watchdog_thread.join(timeout=5)
+        watchdog_thread.join(timeout=10)
 
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
@@ -639,7 +759,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False):
+def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False, max_tasks_per_worker=None):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
@@ -656,8 +776,18 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False)
         PAGE_START line -- that's exactly the page it's stuck on, with
         no need to infer it from surrounding pages or wait to see
         whether it was "just slow".
+    :param max_tasks_per_worker: if set, this worker voluntarily exits
+        after completing this many pages, rather than continuing
+        indefinitely -- process_dump()'s main thread then spawns a
+        fresh replacement in its place via maintain_worker_pool() (see
+        there for why this exists: a worker process can accumulate
+        memory over a long run in ways that can't be freed while it
+        keeps running, only by starting a new one).
+        None (the default) means no limit, matching
+        multiprocessing.Pool's own maxtasksperchild=None convention.
     """
     configure_mapreduce_logging(debug_map_reduce)
+    tasks_completed = 0
     while True:
         job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
         if job:
@@ -674,6 +804,12 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False)
             text = out.getvalue()
             output_queue.put((job[-1], text))  # (ordinal, extracted_text)
             out.close()
+            tasks_completed += 1
+            if max_tasks_per_worker and tasks_completed >= max_tasks_per_worker:
+                logging.info(
+                    "WORKER_RETIRING pid=%d completed %d task(s), retiring "
+                    "for a fresh replacement", os.getpid(), tasks_completed)
+                break
         else:
             break
 
@@ -848,6 +984,16 @@ def main():
                              "identifiable even without waiting for it to complete: "
                              "sort PAGE_TIMING lines by elapsed time to spot an "
                              "outlier, or find a PID's dangling PAGE_START.")
+    groupS.add_argument("--max_tasks_per_worker", type=int, default=500,
+                        help="have each extraction worker voluntarily retire "
+                             "(and get replaced by a fresh one) after completing "
+                             "this many pages, bounding how much memory any one "
+                             "worker process can accumulate over a long run -- "
+                             "some of that accumulation can't be freed while a "
+                             "process keeps running, only by starting a new one. "
+                             "The default is set to avoid OOM on observed use cases. "
+                             "Unset (0) means no limit, matching "
+                             "multiprocessing.Pool's own maxtasksperchild.")
     groupS.add_argument("-a", "--article", action="store_true",
                         help="analyze a file containing a single article (debug option)")
     groupS.add_argument("-v", "--version", action="version",
@@ -924,8 +1070,8 @@ def main():
 
     configure_mapreduce_logging(args.debug_map_reduce)
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.html_safe, not args.no_templates,
-                 args.debug_map_reduce)
+                 args.compress, args.processes, args.html_safe,
+                 not args.no_templates, args.debug_map_reduce, args.max_tasks_per_worker)
 
 if __name__ == '__main__':
     main()
