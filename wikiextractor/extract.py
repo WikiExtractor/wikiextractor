@@ -2477,7 +2477,16 @@ def callParserFunction(functionName, args, frame):
 # ----------------------------------------------------------------------
 # Extract Template definition
 
-reNoinclude = re.compile(r'<noinclude>(?:.*?)</noinclude>', re.DOTALL)
+# One trailing newline right after </noinclude> is collapsed, matching
+# MediaWiki's own stripped/preserved whitespace rules:
+# https://www.mediawiki.org/wiki/Manual:Newlines_and_spaces
+# Trailing-side only (not before the opening tag too): stripping both
+# sides would merge unrelated content that precedes/follows the
+# <noinclude> block onto a single line, rather than just closing the
+# gap the removed block leaves behind. Not extended to <includeonly>,
+# whose content is always kept either way, so removing just its tags
+# leaves no such gap to begin with.
+reNoinclude = re.compile(r'<noinclude>(?:.*?)</noinclude>\n?', re.DOTALL)
 reIncludeonly = re.compile(r'<includeonly>|</includeonly>', re.DOTALL)
 
 # These are built before spawning processes, hence they are shared.
@@ -2532,10 +2541,10 @@ def define_template(title, page):
     text = reNoinclude.sub('', text)
     # eliminate unterminated <noinclude> elements
     text = re.sub(r'<noinclude\s*>.*$', '', text, flags=re.DOTALL)
-    text = re.sub(r'<noinclude/>', '', text)
+    text = re.sub(r'<noinclude/>\n?', '', text)
 
     onlyincludeAccumulator = ''
-    for m in re.finditer('<onlyinclude>(.*?)</onlyinclude>', text, re.DOTALL):
+    for m in re.finditer(r'<onlyinclude>\n?(.*?)\n?</onlyinclude>', text, re.DOTALL):
         onlyincludeAccumulator += m.group(1)
     if onlyincludeAccumulator:
         text = onlyincludeAccumulator
