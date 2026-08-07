@@ -70,7 +70,8 @@ from io import StringIO
 from multiprocessing import Queue, get_context, cpu_count, Value, Condition
 from timeit import default_timer
 
-from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
+from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces, \
+    resolve_template_page, redirects
 from . import template_blob
 
 # ===========================================================================
@@ -220,7 +221,7 @@ tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*>(?:([^<]*)(<.*?>)?)?')
 #                    1     2               3      4
 
 
-def load_templates(file, output_file=None, encoding='utf-8', templates=None):
+def load_templates(file, output_file=None, encoding='utf-8', templates=None, blob_builder=None):
     """
     Load templates from :param file:.
     :param output_file: file where to save templates and modules.
@@ -233,12 +234,18 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None):
         own dict here explicitly and keep using that same reference
         -- this function mutates it in place, same as
         define_template() itself always has, just one level up.
+        Ignored when blob_builder is given.
+    :param blob_builder: a template_blob.StreamingTemplateBlobBuilder
+        to stream parsed templates directly into instead of
+        populating `templates` -- for a real, full-scale dump, this
+        avoids ever holding a full {title: text} dict in memory at
+        all (see StreamingTemplateBlobBuilder's own docstring).
     :return: number of templates loaded.
     """
     global templateNamespace
     global moduleNamespace, modulePrefix
     modulePrefix = moduleNamespace + ':'
-    if templates is None:
+    if blob_builder is None and templates is None:
         templates = {}
     articles = 0
     template_count = 0
@@ -290,7 +297,16 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None):
             page.append(line)
         elif tag == '/page':
             if title.startswith(Extractor.templatePrefix):
-                define_template(title, page, templates)
+                if blob_builder is not None:
+                    result = resolve_template_page(title, page)
+                    if result is not None:
+                        kind, value = result
+                        if kind == 'redirect':
+                            redirects[title] = value
+                        else:
+                            blob_builder.add(title, value)
+                else:
+                    define_template(title, page, templates)
                 template_count += 1
             # save templates and modules to file
             if output_file and (title.startswith(Extractor.templatePrefix) or
@@ -471,6 +487,65 @@ def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interva
             "%.1f" % sum(worker_mems) if worker_mems else "unknown")
 
 
+def load_and_compact_templates(template_file, input_file, input):
+    """Loads templates (from template_file if given, else input_file
+    itself) and compacts them into a shared-memory-backed view.
+
+    Returns (template_blob_ctx, input) -- input is returned because,
+    when template_file isn't given, this scans and then re-opens
+    input_file itself, and the caller needs that updated handle.
+
+    Streams parsed templates directly into a
+    template_blob.StreamingTemplateBlobBuilder rather than building a
+    full {title: text} dict first and compacting it as a separate
+    pass -- at full EN scale (~900K templates), having both
+    representations resident at once meant this function's own peak
+    RSS was roughly double the size of the templates themselves,
+    confirmed directly on a real, memory-constrained production run
+    (mapper RSS: ~1.85GB after loading a plain dict, ~4.2GB once the
+    blob was also built alongside it -- and that ~1.85GB never fully
+    came back afterward either, even after the dict went out of scope
+    and an explicit gc.collect(): CPython's own allocator only returns
+    a fully-empty arena to the OS, and a dict with hundreds of
+    thousands of individually-allocated strings, built while other,
+    unrelated parsing allocations were happening at the same time,
+    left enough live stragglers scattered across arenas that most of
+    it stayed mapped). Streaming avoids the dict existing at all, so
+    there's nothing separate left to free or that can fail to be
+    freed -- the content blob's bytes are the only large allocation
+    made, once, directly.
+    """
+    builder = template_blob.StreamingTemplateBlobBuilder()
+    template_load_start = default_timer()
+    if template_file and os.path.exists(template_file):
+        logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
+        file = decode_open(template_file)
+        template_count = load_templates(file, blob_builder=builder)
+        file.close()
+    else:
+        if input_file == '-':
+            # can't scan then reset stdin; must error w/ suggestion to specify template_file
+            raise ValueError("to use templates with stdin dump, must supply explicit template-file")
+        logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
+        template_count = load_templates(input, template_file, blob_builder=builder)
+        input.close()
+        input = decode_open(input_file)
+    logging.info("Loaded %d templates in %.1fs", template_count, default_timer() - template_load_start)
+
+    # See template_blob.py's own module docstring for why compaction
+    # itself is necessary (fork()'s copy-on-write doesn't protect a
+    # dict of Python objects the way it looks like it should).
+    # template_blob_ctx gets threaded through explicitly to
+    # extract_process() below (and to the single-article path in
+    # main()), which construct their own CompactedTemplates and pass
+    # it directly into each Extractor(..., templates=...).
+    compact_start = default_timer()
+    template_blob_ctx = template_blob.compact_blobs(*builder.finish())
+    logging.info("Compacted templates into shared memory in %.1fs",
+                 default_timer() - compact_start)
+    return template_blob_ctx, input
+
+
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
                  process_count, html_safe, expand_templates=True, debug_map_reduce=False):
     """
@@ -518,54 +593,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             break
 
     if expand_templates:
-        # preprocess
-        template_load_start = default_timer()
-        raw_templates = {}
-        if template_file and os.path.exists(template_file):
-            logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
-            file = decode_open(template_file)
-            template_count = load_templates(file, templates=raw_templates)
-            file.close()
-        else:
-            if input_file == '-':
-                # can't scan then reset stdin; must error w/ suggestion to specify template_file
-                raise ValueError("to use templates with stdin dump, must supply explicit template-file")
-            logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
-            template_count = load_templates(input, template_file, templates=raw_templates)
-            input.close()
-            input = decode_open(input_file)
-        template_load_elapsed = default_timer() - template_load_start
-        logging.info("Loaded %d templates in %.1fs", template_count, template_load_elapsed)
-
-        # Compact raw_templates (a plain dict, ~900K individual str
-        # objects at full EN scale) into a shared-memory-backed,
-        # read-only view before forking workers. Necessary because
-        # fork()'s copy-on-write sharing doesn't actually protect a
-        # dict of Python objects the way it looks like it should --
-        # every *read* (even `title in templates`) bumps the touched
-        # object's own refcount, which is a write at the memory level,
-        # so a worker doing nothing but ordinary template lookups
-        # still ends up silently, irreversibly privatizing large
-        # fractions of the dict's pages over its lifetime. See
-        # template_blob.py's own module docstring for the full
-        # reasoning and the production measurements that confirmed it.
-        #
-        # template_blob_names gets threaded through explicitly to
-        # extract_process() below (and to the single-article path in
-        # main()), which construct their own CompactedTemplates and
-        # pass it directly into each Extractor(..., templates=...) --
-        # not picked up implicitly by workers via any shared global --
-        # there is no module-level `templates` in extract.py at all
-        # anymore for that to mean; every reader (Extractor) and
-        # writer (define_template()) takes it as an explicit argument.
-        # This process (the mapper) never constructs an Extractor
-        # itself, so it has no need to hold onto the compacted view --
-        # just the names, to hand to workers, and the cleanup
-        # callback, to release the shared memory once everyone's done.
-        compact_start = default_timer()
-        template_blob_ctx = template_blob.compact(raw_templates)
-        logging.info("Compacted templates into shared memory in %.1fs",
-                     default_timer() - compact_start)
+        template_blob_ctx, input = load_and_compact_templates(template_file, input_file, input)
     else:
         # nullcontext, not None -- keeps the with-statement below
         # uniform regardless of whether templates are in play at all,
@@ -977,17 +1005,23 @@ def main():
         ignoreTag('a')
 
     if args.article:
+        def compact_article_templates(templates_path):
+            """Streams directly into a blob builder, same as
+            load_and_compact_templates() -- matches real behavior more
+            closely, and --article exists partly to validate that."""
+            builder = template_blob.StreamingTemplateBlobBuilder()
+            with decode_open(templates_path) as file:
+                load_templates(file, blob_builder=builder)
+            return template_blob.compact_blobs(*builder.finish())
+
         if args.templates and os.path.exists(args.templates):
-            with decode_open(args.templates) as file:
-                raw_templates = {}
-                load_templates(file, templates=raw_templates)
             # Same compaction as process_dump() -- deliberately not a
             # separate plain-dict path for --article just because
             # there's no forking here to protect against: --article
             # exists partly to validate real behavior, and exercising
             # a different templates lookup mechanism here than what
             # real multiprocess runs use would defeat that.
-            article_templates_ctx = template_blob.compact(raw_templates)
+            article_templates_ctx = compact_article_templates(args.templates)
         else:
             article_templates_ctx = contextlib.nullcontext((None, None))
 

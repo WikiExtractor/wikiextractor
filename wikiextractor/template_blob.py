@@ -258,15 +258,12 @@ class CompactedTemplatesOwner:
         return False
 
 
-def compact(templates_dict):
-    """Build shared-memory segments from templates_dict and return a
-    CompactedTemplatesOwner -- a context manager that, on exit, closes
-    and unlinks the three underlying shared_memory segments for good.
-    See CompactedTemplatesOwner's own docstring for the intended usage
-    shape and why this is a different type from what attach() returns.
+def compact_blobs(records_bytes, titles_bytes, content_bytes):
+    """Wraps already-built (records, titles, content) blobs -- from
+    build_template_blobs() or StreamingTemplateBlobBuilder.finish() --
+    into shared memory and returns a CompactedTemplatesOwner. See
+    compact()'s own docstring for the intended usage shape.
     """
-    records_bytes, titles_bytes, content_bytes = build_template_blobs(templates_dict)
-
     records_shm = shared_memory.SharedMemory(create=True, size=max(1, len(records_bytes)))
     records_shm.buf[:len(records_bytes)] = records_bytes
     titles_shm = shared_memory.SharedMemory(create=True, size=max(1, len(titles_bytes)))
@@ -283,6 +280,85 @@ def compact(templates_dict):
     names = (records_shm.name, titles_shm.name, content_shm.name, len(records_bytes))
 
     return CompactedTemplatesOwner(wrapper, names)
+
+
+def compact(templates_dict):
+    """Build shared-memory segments from templates_dict and return a
+    CompactedTemplatesOwner -- a context manager that, on exit, closes
+    and unlinks the three underlying shared_memory segments for good.
+    See CompactedTemplatesOwner's own docstring for the intended usage
+    shape and why this is a different type from what attach() returns.
+
+    templates_dict must already exist as a full {title: text} dict --
+    for loading a real, full-scale dump, prefer
+    StreamingTemplateBlobBuilder instead, which builds the same blobs
+    without ever holding that dict in memory at all. This function
+    stays for callers (tests, smaller tools) that already have such a
+    dict on hand for other reasons.
+    """
+    return compact_blobs(*build_template_blobs(templates_dict))
+
+
+class StreamingTemplateBlobBuilder:
+    """Builds the same three blobs as build_template_blobs(), one
+    (title, text) pair at a time, without ever holding a full
+    {title: text} dict in memory -- only the (title, content_offset,
+    content_length) metadata, far smaller than the template bodies
+    themselves, survives between add() calls. content_blob doesn't
+    need to be title-sorted -- only records (the binary-searchable
+    index) does, since each record just points at wherever its own
+    content happens to live -- so content is appended in whatever
+    order add() is called, and only the metadata gets sorted, once,
+    at finish().
+
+    Exists because build_template_blobs() requires a complete dict
+    up front: at full EN scale, loading that dict, then building an
+    equally large set of blobs from it while the dict is still alive,
+    means both representations of ~900K templates are resident at
+    once -- confirmed directly on a real, memory-constrained
+    production run, where this doubled peak was measured contributing
+    directly to an earlier out-of-memory kill. Streaming avoids the
+    dict existing at all, not just freeing it quickly afterward.
+
+    Usage:
+        builder = StreamingTemplateBlobBuilder()
+        builder.add('Template:Foo', 'some text')
+        ...
+        owner = compact_blobs(*builder.finish())
+    """
+
+    def __init__(self):
+        self._content_parts = []
+        self._content_offset = 0
+        self._metadata = []  # (title, content_offset, content_length)
+
+    def add(self, title, text):
+        encoded = text.encode('utf-8')
+        length = len(encoded)
+        self._metadata.append((title, self._content_offset, length))
+        self._content_parts.append(encoded)
+        self._content_offset += length
+
+    def finish(self):
+        """Returns (records_bytes, titles_bytes, content_bytes), the
+        same shape build_template_blobs() returns -- pass straight
+        into compact_blobs()."""
+        content_blob = b''.join(self._content_parts)
+        self._content_parts = None  # let the (now-redundant) parts list go
+
+        title_parts = []
+        title_offset = 0
+        records = []
+        for title, c_off, c_len in sorted(self._metadata, key=lambda t: t[0]):
+            encoded_title = title.encode('utf-8')
+            records.append(struct.pack(RECORD_FORMAT, title_offset, len(encoded_title), c_off, c_len))
+            title_parts.append(encoded_title)
+            title_offset += len(encoded_title)
+        self._metadata = None
+        titles_blob = b''.join(title_parts)
+        records_blob = b''.join(records)
+
+        return records_blob, titles_blob, content_blob
 
 
 def attach(names):

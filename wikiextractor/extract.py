@@ -2518,54 +2518,36 @@ reIncludeonly = re.compile(r'<includeonly>|</includeonly>', re.DOTALL)
 redirects = {}
 
 
-def define_template(title, page, templates):
+def resolve_template_page(title, page):
     """
-    Adds a template defined in the :param page: to :param templates:.
-    :param templates: the {title: text} dict to populate -- required,
-        not defaulted, since this function's entire job is writing
-        into it; a silent "if not given, use a throwaway empty dict"
-        default would make a forgotten argument fail silently (the
-        template is "defined" into a dict nobody keeps) rather than
-        loudly, which is worse than just requiring it.
-    @see https://en.wikipedia.org/wiki/Help:Template#Noinclude.2C_includeonly.2C_and_onlyinclude
+    Given a template page's raw text lines, determines whether it's a
+    redirect or a genuine template definition, and if the latter,
+    computes its final, stored text (comments stripped,
+    noinclude/includeonly/onlyinclude resolved per
+    https://en.wikipedia.org/wiki/Help:Template#Noinclude.2C_includeonly.2C_and_onlyinclude).
+
+    Returns one of:
+      - None: nothing to store (an empty page, or a template whose
+        body is empty once noinclude/includeonly processing is done).
+      - ('redirect', target_title)
+      - ('template', final_text)
+
+    Used by both define_template() (writes into a plain {title: text}
+    dict) and template_blob's streaming builder (appends straight into
+    a shared-memory blob without ever building that dict at all) --
+    kept as the one place this resolution logic lives so both stay in
+    sync automatically.
     """
-    global redirects
-
-    # title = normalizeTitle(title)
-
-    # An empty page (zero lines) is a genuine, valid case for a
-    # template whose current revision has no content at all (a
-    # self-closing <text bytes="0" .../> in the source) -- not a
-    # redirect, and not any real content either. Reachable now that
-    # collect_pages()/load_templates() correctly recognize that
-    # self-closing form instead of silently merging the next page's
-    # content into this one.
     if not page:
-        return
+        return None
 
-    # check for redirects
     m = redirectRE.match(page[0])
     if m:
-        redirects[title] = m.group(1)  # normalizeTitle(m.group(1))
-        return
+        return ('redirect', m.group(1))
 
     text = unescape(''.join(page))
-
-    # We're storing template text for future inclusion, therefore,
-    # remove all <noinclude> text and keep all <includeonly> text
-    # (but eliminate <includeonly> tags per se).
-    # However, if <onlyinclude> ... </onlyinclude> parts are present,
-    # then only keep them and discard the rest of the template body.
-    # This is because using <onlyinclude> on a text fragment is
-    # equivalent to enclosing it in <includeonly> tags **AND**
-    # enclosing all the rest of the template body in <noinclude> tags.
-
-    # remove comments
     text = comment.sub('', text)
-
-    # eliminate <noinclude> fragments
     text = reNoinclude.sub('', text)
-    # eliminate unterminated <noinclude> elements
     text = re.sub(r'<noinclude\s*>.*$', '', text, flags=re.DOTALL)
     text = re.sub(r'<noinclude/>\n?', '', text)
 
@@ -2577,7 +2559,30 @@ def define_template(title, page, templates):
     else:
         text = reIncludeonly.sub('', text)
 
-    if text:
-        if title in templates and templates[title] != text:
-            logger.warning('Redefining: %s', title)
-        templates[title] = text
+    if not text:
+        return None
+    return ('template', text)
+
+
+def define_template(title, page, templates):
+    """
+    Adds a template defined in the :param page: to :param templates:.
+    :param templates: the {title: text} dict to populate -- required,
+        not defaulted, since this function's entire job is writing
+        into it; a silent "if not given, use a throwaway empty dict"
+        default would make a forgotten argument fail silently (the
+        template is "defined" into a dict nobody keeps) rather than
+        loudly, which is worse than just requiring it.
+    """
+    global redirects
+    result = resolve_template_page(title, page)
+    if result is None:
+        return
+    kind, value = result
+    if kind == 'redirect':
+        redirects[title] = value
+        return
+    text = value
+    if title in templates and templates[title] != text:
+        logger.warning('Redefining: %s', title)
+    templates[title] = text
