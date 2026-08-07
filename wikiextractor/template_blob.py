@@ -209,19 +209,61 @@ class CompactedTemplates:
         for shm in self._owned_shms:
             shm.unlink()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        # Deliberately close() only, never unlink(): this class is
+        # used identically by both the creator (compact()) and every
+        # consumer that merely attach()ed to an existing segment by
+        # name -- a consumer unlinking would destroy shared memory
+        # out from under any sibling worker still reading it. Full
+        # lifetime ownership (close + unlink) is CompactedTemplatesOwner's
+        # job specifically, returned by compact() for exactly this
+        # reason -- see there.
+        self.close()
+        return False
+
+
+class CompactedTemplatesOwner:
+    """Context manager for the process that actually called compact()
+    -- as opposed to CompactedTemplates itself, which every consumer
+    (the owner included) uses identically for read access and for
+    releasing just its own view. On exit, this one additionally
+    unlinks the underlying shared memory for good, which must only
+    ever happen once, from the creator, after every consumer (workers,
+    or this same process if used in-line) is done -- never from a
+    worker that only attach()ed.
+
+    Usage:
+        with template_blob.compact(raw_templates) as (wrapper, names):
+            # spawn workers, pass them `names` to attach() with, wait
+            # for them to finish (or do in-process reads via `wrapper`
+            # directly, e.g. the single-article path)
+        # close() + unlink() on all three segments happens here,
+        # automatically, even if the block above raised.
+    """
+
+    def __init__(self, wrapper, names):
+        self.wrapper = wrapper
+        self.names = names
+
+    def __enter__(self):
+        return self.wrapper, self.names
+
+    def __exit__(self, *exc_info):
+        self.wrapper.close()
+        for shm in self.wrapper._owned_shms:
+            shm.unlink()
+        return False
+
 
 def compact(templates_dict):
     """Build shared-memory segments from templates_dict and return a
-    (CompactedTemplates, cleanup) pair. cleanup() must be called
-    exactly once, after every consumer (workers, or the caller itself
-    in the single-article case) is done -- it closes and unlinks the
-    three underlying shared_memory segments.
-
-    The returned CompactedTemplates also owns and closes its own
-    handles to these segments (via .close()); cleanup() additionally
-    unlinks them (releasing the memory for real) -- kept separate
-    since only the creator should ever unlink, while every consumer,
-    including the creator itself, should close.
+    CompactedTemplatesOwner -- a context manager that, on exit, closes
+    and unlinks the three underlying shared_memory segments for good.
+    See CompactedTemplatesOwner's own docstring for the intended usage
+    shape and why this is a different type from what attach() returns.
     """
     records_bytes, titles_bytes, content_bytes = build_template_blobs(templates_dict)
 
@@ -240,12 +282,7 @@ def compact(templates_dict):
 
     names = (records_shm.name, titles_shm.name, content_shm.name, len(records_bytes))
 
-    def cleanup():
-        wrapper.close()
-        for shm in (records_shm, titles_shm, content_shm):
-            shm.unlink()
-
-    return wrapper, names, cleanup
+    return CompactedTemplatesOwner(wrapper, names)
 
 
 def attach(names):
@@ -253,6 +290,13 @@ def attach(names):
     segments by name (as returned by compact()) and return a
     CompactedTemplates view over them. Cheap -- three small mmap
     attach calls, no data copied.
+
+    The returned object is itself a context manager (via
+    CompactedTemplates.__enter__/__exit__) -- `with attach(names) as
+    worker_templates:` closes this process's own view automatically
+    on exit, without ever unlinking the underlying segments (that
+    remains the creator's responsibility alone, via
+    CompactedTemplatesOwner -- see compact()).
 
     names: (records_name, titles_name, content_name, records_len) --
     records_len (the real byte length of the records blob, as

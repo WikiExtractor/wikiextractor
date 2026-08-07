@@ -59,6 +59,7 @@ collecting template definitions.
 
 import argparse
 import bz2
+import contextlib
 import logging
 import os.path
 import re  # TODO use regex when it will be standard
@@ -562,126 +563,127 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         # just the names, to hand to workers, and the cleanup
         # callback, to release the shared memory once everyone's done.
         compact_start = default_timer()
-        _wrapper, template_blob_names, template_blob_cleanup = template_blob.compact(raw_templates)
+        template_blob_ctx = template_blob.compact(raw_templates)
         logging.info("Compacted templates into shared memory in %.1fs",
                      default_timer() - compact_start)
     else:
-        template_blob_names = None
-        template_blob_cleanup = None
+        # nullcontext, not None -- keeps the with-statement below
+        # uniform regardless of whether templates are in play at all,
+        # rather than needing a separate branch for --no-templates.
+        template_blob_ctx = contextlib.nullcontext((None, None))
+    with template_blob_ctx as (_wrapper, template_blob_names):
+        # process pages
+        logging.info("Starting page extraction from %s.", input_file)
+        extract_start = default_timer()
 
-    # process pages
-    logging.info("Starting page extraction from %s.", input_file)
-    extract_start = default_timer()
+        # Parallel Map/Reduce:
+        # - pages to be processed are dispatched to workers
+        # - a reduce process collects the results, sort them and print them.
 
-    # Parallel Map/Reduce:
-    # - pages to be processed are dispatched to workers
-    # - a reduce process collects the results, sort them and print them.
+        # fixes MacOS error: TypeError: cannot pickle '_io.TextIOWrapper' object
+        Process = get_context("fork").Process
 
-    # fixes MacOS error: TypeError: cannot pickle '_io.TextIOWrapper' object
-    Process = get_context("fork").Process
+        maxsize = 10 * process_count
+        # output queue
+        output_queue = Queue(maxsize=maxsize)
 
-    maxsize = 10 * process_count
-    # output queue
-    output_queue = Queue(maxsize=maxsize)
+        # Shared counter reduce_process updates every time it successfully
+        # writes an ordinal out, so the mapper below can tell how far
+        # ahead of the actually-written output it's gotten -- without this,
+        # nothing stops the mapper from queueing (and workers from
+        # completing) unboundedly many pages while reduce_process is stuck
+        # waiting on one specific ordinal, e.g. a genuinely stuck or
+        # extremely slow page: every other worker just keeps racing ahead,
+        # and every one of their completed results piles up in
+        # reduce_process's own ordering_buffer, which has no size limit at
+        # all. This bounds how far ahead the pipeline is allowed to get,
+        # at the mapper (job-dispatch) side specifically -- NOT inside
+        # reduce_process itself, since reduce_process must keep draining
+        # output_queue unconditionally to have any chance of ever finding
+        # the specific ordinal it's waiting for (a plain multiprocessing
+        # Queue only supports FIFO reads, with no way to selectively wait
+        # for one specific item while ignoring others ahead of it in the
+        # queue -- pausing reduce_process's own consumption was tried and
+        # reverted after it produced a genuine deadlock in testing).
+        next_ordinal_shared = Value('l', 0)
 
-    # Shared counter reduce_process updates every time it successfully
-    # writes an ordinal out, so the mapper below can tell how far
-    # ahead of the actually-written output it's gotten -- without this,
-    # nothing stops the mapper from queueing (and workers from
-    # completing) unboundedly many pages while reduce_process is stuck
-    # waiting on one specific ordinal, e.g. a genuinely stuck or
-    # extremely slow page: every other worker just keeps racing ahead,
-    # and every one of their completed results piles up in
-    # reduce_process's own ordering_buffer, which has no size limit at
-    # all. This bounds how far ahead the pipeline is allowed to get,
-    # at the mapper (job-dispatch) side specifically -- NOT inside
-    # reduce_process itself, since reduce_process must keep draining
-    # output_queue unconditionally to have any chance of ever finding
-    # the specific ordinal it's waiting for (a plain multiprocessing
-    # Queue only supports FIFO reads, with no way to selectively wait
-    # for one specific item while ignoring others ahead of it in the
-    # queue -- pausing reduce_process's own consumption was tried and
-    # reverted after it produced a genuine deadlock in testing).
-    next_ordinal_shared = Value('l', 0)
+        # Notified by reduce_process every time next_ordinal_shared
+        # advances, so the mapper's throttle below can genuinely wake up
+        # on that specific event, rather than polling the value on some
+        # fixed interval regardless of whether anything happened.
+        progress_condition = Condition()
 
-    # Notified by reduce_process every time next_ordinal_shared
-    # advances, so the mapper's throttle below can genuinely wake up
-    # on that specific event, rather than polling the value on some
-    # fixed interval regardless of whether anything happened.
-    progress_condition = Condition()
+        # Reduce job that sorts and prints output
+        reduce = Process(target=reduce_process,
+                          args=(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition, debug_map_reduce))
+        reduce.start()
 
-    # Reduce job that sorts and prints output
-    reduce = Process(target=reduce_process,
-                      args=(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition, debug_map_reduce))
-    reduce.start()
+        # initialize jobs queue
+        jobs_queue = Queue(maxsize=maxsize)
 
-    # initialize jobs queue
-    jobs_queue = Queue(maxsize=maxsize)
+        # start worker processes
+        logging.info("Using %d extract processes.", process_count)
+        workers = []
+        for _ in range(max(1, process_count)):
+            extractor = Process(target=extract_process,
+                                args=(jobs_queue, output_queue, html_safe, debug_map_reduce,
+                                      template_blob_names))
+            extractor.daemon = True  # only live while parent process lives
+            extractor.start()
+            workers.append(extractor)
 
-    # start worker processes
-    logging.info("Using %d extract processes.", process_count)
-    workers = []
-    for _ in range(max(1, process_count)):
-        extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, html_safe, debug_map_reduce,
-                                  template_blob_names))
-        extractor.daemon = True  # only live while parent process lives
-        extractor.start()
-        workers.append(extractor)
+        watchdog_stop = threading.Event()
+        watchdog_thread = None
+        if mapreduce_logger.isEnabledFor(logging.DEBUG):
+            watchdog_thread = threading.Thread(
+                target=watchdog, args=(jobs_queue, output_queue, reduce, workers, watchdog_stop),
+                daemon=True)
+            watchdog_thread.start()
 
-    watchdog_stop = threading.Event()
-    watchdog_thread = None
-    if mapreduce_logger.isEnabledFor(logging.DEBUG):
-        watchdog_thread = threading.Thread(
-            target=watchdog, args=(jobs_queue, output_queue, reduce, workers, watchdog_stop),
-            daemon=True)
-        watchdog_thread.start()
+        # Mapper process
 
-    # Mapper process
+        # we collect individual lines, since str.join() is significantly faster
+        # than concatenation
 
-    # we collect individual lines, since str.join() is significantly faster
-    # than concatenation
+        ordinal = 0  # page count
+        # How far ahead of the last actually-written ordinal the mapper is
+        # willing to get before pausing -- matches the same maxsize
+        # convention already used for the queues themselves, so this stays
+        # proportional to process_count.
+        for id, revid, title, page in collect_pages(input):
+            while ordinal - next_ordinal_shared.value > maxsize:
+                # progress_condition is notified by reduce_process every
+                # time next_ordinal_shared actually advances (see there),
+                with progress_condition:
+                    progress_condition.wait(timeout=1.0)
+            job = (id, revid, urlbase, title, page, ordinal)
+            jobs_queue.put(job)  # goes to any available extract_process
+            mapreduce_logger.debug("JOB_QUEUED ordinal=%d id=%s title=%r", ordinal, id, title)
+            ordinal += 1
 
-    ordinal = 0  # page count
-    # How far ahead of the last actually-written ordinal the mapper is
-    # willing to get before pausing -- matches the same maxsize
-    # convention already used for the queues themselves, so this stays
-    # proportional to process_count.
-    for id, revid, title, page in collect_pages(input):
-        while ordinal - next_ordinal_shared.value > maxsize:
-            # progress_condition is notified by reduce_process every
-            # time next_ordinal_shared actually advances (see there),
-            with progress_condition:
-                progress_condition.wait(timeout=1.0)
-        job = (id, revid, urlbase, title, page, ordinal)
-        jobs_queue.put(job)  # goes to any available extract_process
-        mapreduce_logger.debug("JOB_QUEUED ordinal=%d id=%s title=%r", ordinal, id, title)
-        ordinal += 1
+        input.close()
 
-    input.close()
+        # signal termination
+        for _ in workers:
+            jobs_queue.put(None)
+        # wait for workers to terminate
+        for w in workers:
+            w.join()
 
-    # signal termination
-    for _ in workers:
-        jobs_queue.put(None)
-    # wait for workers to terminate
-    for w in workers:
-        w.join()
+        # signal end of work to reduce process
+        output_queue.put(None)
+        # wait for it to finish
+        reduce.join()
 
-    # signal end of work to reduce process
-    output_queue.put(None)
-    # wait for it to finish
-    reduce.join()
+        watchdog_stop.set()
+        if watchdog_thread is not None:
+            watchdog_thread.join(timeout=5)
 
-    watchdog_stop.set()
-    if watchdog_thread is not None:
-        watchdog_thread.join(timeout=5)
-
-    # Every worker and the reducer have now exited (w.join()/reduce.join()
-    # above already waited for that) -- safe to release the shared
-    # memory for good. template_blob_cleanup is None when extraction
-    # ran with --no-templates, since nothing was ever compacted.
-    if template_blob_cleanup is not None:
-        template_blob_cleanup()
+        # Every worker and the reducer have now exited (w.join()/reduce.join()
+        # above already waited for that) -- safe for the with-block above
+        # to release the shared memory for good on exit (close() + unlink()
+        # via CompactedTemplatesOwner.__exit__, or a no-op if this ran with
+        # --no-templates via nullcontext).
 
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
@@ -713,39 +715,46 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
     :param template_blob_names: names of the shared-memory segments
         built by template_blob.compact() in process_dump(), or None
         if extraction is running with --no-templates. Attached here,
-        once, at worker startup, and the resulting view passed
-        explicitly into every Extractor(...) constructed below --
-        not assigned to the extract module's own `templates` global,
-        which used to be how a worker's template source got set up.
-        Passing it as a constructor argument means extract.py's own
-        behavior is visible in extract.py itself (Extractor takes a
-        templates argument) rather than being silently swappable only
-        from here; it's also what's actually required once this
-        worker starts being launched via spawn instead of fork, which
+        once, at worker startup, inside a with-block so this worker's
+        own view is closed automatically when the loop below exits
+        (never unlinked, though -- that's the creator's job alone via
+        CompactedTemplatesOwner, since a worker unlinking the shared
+        segment would destroy it out from under any sibling worker
+        still using it). The resulting view is passed explicitly into
+        every Extractor(...) constructed below -- not assigned to the
+        extract module's own `templates` global, which used to be how
+        a worker's template source got set up. Passing it as a
+        constructor argument means extract.py's own behavior is
+        visible in extract.py itself (Extractor takes a templates
+        argument) rather than being silently swappable only from
+        here; it's also what's actually required once this worker
+        starts being launched via spawn instead of fork, which
         inherits nothing implicitly at all -- doing it this way now
         means extract_process()'s own body doesn't need to change
         shape later for that transition.
     """
     configure_mapreduce_logging(debug_map_reduce)
-    worker_templates = template_blob.attach(template_blob_names) if template_blob_names is not None else None
-    while True:
-        job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
-        if job:
-            page_id, _, _, title, _, ordinal = job
-            start = time.time()
-            mapreduce_logger.debug("PAGE_START pid=%d ordinal=%d id=%s title=%r",
-                                   os.getpid(), ordinal, page_id, title)
-            out = StringIO()  # memory buffer
-            Extractor(*job[:-1], templates=worker_templates).extract(out, html_safe)  # (id, urlbase, title, page)
-            finish = time.time()
-            mapreduce_logger.debug(
-                "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r elapsed=%.2fs",
-                os.getpid(), ordinal, page_id, title, finish - start)
-            text = out.getvalue()
-            output_queue.put((job[-1], text))  # (ordinal, extracted_text)
-            out.close()
-        else:
-            break
+    worker_ctx = (template_blob.attach(template_blob_names) if template_blob_names is not None
+                  else contextlib.nullcontext(None))
+    with worker_ctx as worker_templates:
+        while True:
+            job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
+            if job:
+                page_id, _, _, title, _, ordinal = job
+                start = time.time()
+                mapreduce_logger.debug("PAGE_START pid=%d ordinal=%d id=%s title=%r",
+                                       os.getpid(), ordinal, page_id, title)
+                out = StringIO()  # memory buffer
+                Extractor(*job[:-1], templates=worker_templates).extract(out, html_safe)  # (id, urlbase, title, page)
+                finish = time.time()
+                mapreduce_logger.debug(
+                    "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r elapsed=%.2fs",
+                    os.getpid(), ordinal, page_id, title, finish - start)
+                text = out.getvalue()
+                output_queue.put((job[-1], text))  # (ordinal, extracted_text)
+                out.close()
+            else:
+                break
 
 
 def reduce_process(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition, debug_map_reduce=False):
@@ -968,30 +977,26 @@ def main():
         ignoreTag('a')
 
     if args.article:
-        template_blob_cleanup = None
-        article_templates = None
-        if args.templates:
-            if os.path.exists(args.templates):
-                with decode_open(args.templates) as file:
-                    raw_templates = {}
-                    load_templates(file, templates=raw_templates)
-                # Same compaction as process_dump() -- deliberately
-                # not a separate plain-dict path for --article just
-                # because there's no forking here to protect against:
-                # --article exists partly to validate real behavior,
-                # and exercising a different templates lookup
-                # mechanism here than what real multiprocess runs use
-                # would defeat that.
-                article_templates, _names, template_blob_cleanup = template_blob.compact(raw_templates)
+        if args.templates and os.path.exists(args.templates):
+            with decode_open(args.templates) as file:
+                raw_templates = {}
+                load_templates(file, templates=raw_templates)
+            # Same compaction as process_dump() -- deliberately not a
+            # separate plain-dict path for --article just because
+            # there's no forking here to protect against: --article
+            # exists partly to validate real behavior, and exercising
+            # a different templates lookup mechanism here than what
+            # real multiprocess runs use would defeat that.
+            article_templates_ctx = template_blob.compact(raw_templates)
+        else:
+            article_templates_ctx = contextlib.nullcontext((None, None))
 
-        urlbase = ''
-        with decode_open(input_file) as input:
-            for id, revid, title, page in collect_pages(input):
-                Extractor(id, revid, urlbase, title, page,
-                          templates=article_templates).extract(sys.stdout)
-
-        if template_blob_cleanup is not None:
-            template_blob_cleanup()
+        with article_templates_ctx as (article_templates, _names):
+            urlbase = ''
+            with decode_open(input_file) as input:
+                for id, revid, title, page in collect_pages(input):
+                    Extractor(id, revid, urlbase, title, page,
+                              templates=article_templates).extract(sys.stdout)
         return
 
     output_path = args.output
