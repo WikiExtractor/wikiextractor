@@ -92,10 +92,10 @@ class LoadTemplatesBlobBuilderPathTests(unittest.TestCase):
     def setUp(self):
         we.templateNamespace = ''
         ex.Extractor.templatePrefix = ''
-        ex.redirects.clear()
 
     def load(self, xml_text):
         builder = tb.StreamingTemplateBlobBuilder()
+        redirects_builder = tb.StreamingTemplateBlobBuilder()
         with io.StringIO(xml_text) as f:
             for line in f:
                 m = we.tagRE.search(line)
@@ -108,8 +108,9 @@ class LoadTemplatesBlobBuilderPathTests(unittest.TestCase):
                 elif tag == '/siteinfo':
                     break
         with io.StringIO(xml_text) as f:
-            count = we.load_templates(f, blob_builder=builder)
-        return count, builder
+            count = we.load_templates(f, blob_builder=builder,
+                                       redirects_blob_builder=redirects_builder)
+        return count, builder, redirects_builder
 
     def test_plain_template_streamed_correctly(self):
         xml = """<mediawiki>
@@ -130,13 +131,13 @@ class LoadTemplatesBlobBuilderPathTests(unittest.TestCase):
 </page>
 </mediawiki>
 """
-        count, builder = self.load(xml)
+        count, builder, redirects_builder = self.load(xml)
         self.assertEqual(count, 1)
         records, titles, content = builder.finish()
         with tb.compact_blobs(records, titles, content) as (wrapper, _names):
             self.assertEqual(wrapper['Template:Greeting'], 'Hello, {{{1}}}!')
 
-    def test_redirect_goes_to_redirects_dict_not_the_blob(self):
+    def test_redirect_goes_to_the_redirects_blob_not_the_templates_blob(self):
         xml = """<mediawiki>
 <siteinfo>
 <namespaces>
@@ -155,11 +156,13 @@ class LoadTemplatesBlobBuilderPathTests(unittest.TestCase):
 </page>
 </mediawiki>
 """
-        count, builder = self.load(xml)
+        count, builder, redirects_builder = self.load(xml)
         self.assertEqual(count, 1)
-        self.assertEqual(ex.redirects.get('Template:Old'), 'Template:New')
         records, titles, content = builder.finish()
-        self.assertEqual(records, b'')  # nothing streamed into the blob itself
+        self.assertEqual(records, b'')  # nothing streamed into the templates blob
+        r_records, r_titles, r_content = redirects_builder.finish()
+        with tb.compact_blobs(r_records, r_titles, r_content) as (wrapper, _names):
+            self.assertEqual(wrapper['Template:Old'], 'Template:New')
 
     def test_noinclude_stripped_includeonly_kept_same_as_dict_based_path(self):
         xml = """<mediawiki>
@@ -185,7 +188,7 @@ documentation that must never appear
 </page>
 </mediawiki>
 """
-        count, builder = self.load(xml)
+        count, builder, redirects_builder = self.load(xml)
         records, titles, content = builder.finish()
         with tb.compact_blobs(records, titles, content) as (wrapper, _names):
             stored = wrapper['Template:WithDocs']

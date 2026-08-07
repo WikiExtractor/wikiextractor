@@ -1456,7 +1456,7 @@ class Extractor():
     # Obtained from TemplateNamespace
     templatePrefix = ''
 
-    def __init__(self, id, revid, urlbase, title, page, templates=None):
+    def __init__(self, id, revid, urlbase, title, page, templates=None, redirects=None):
         """
         :param page: a list of lines.
         :param templates: the {title: text} template lookup this
@@ -1472,6 +1472,9 @@ class Extractor():
             DOES need real templates (extract_process(), the
             --article path) passes its own dict or CompactedTemplates
             view here explicitly.
+        :param redirects: the {title: target_title} redirect lookup,
+            same shape and same defaulting behavior as templates
+            above -- also no longer a module-level global.
         """
         self.id = id
         self.revid = revid
@@ -1479,6 +1482,7 @@ class Extractor():
         self.title = title
         self.page = page
         self.templates = templates if templates is not None else {}
+        self.redirects = redirects if redirects is not None else {}
         self.magicWords = MagicWords()
         self.frame = []
         self.recursion_exceeded_1_errs = 0  # template recursion within expandTemplates()
@@ -1765,7 +1769,7 @@ class Extractor():
             self.template_title_errs += 1
             return ''
 
-        redirected = redirects.get(title)
+        redirected = self.redirects.get(title)
         if redirected:
             title = redirected
 
@@ -2509,14 +2513,6 @@ def callParserFunction(functionName, args, frame):
 reNoinclude = re.compile(r'<noinclude>(?:.*?)</noinclude>\n?', re.DOTALL)
 reIncludeonly = re.compile(r'<includeonly>|</includeonly>', re.DOTALL)
 
-# redirects is still module-level, shared, mutable state -- deferred
-# deliberately, alongside templatePrefix/knownNamespaces/modules, as
-# its own separate piece of work (see define_template()'s own
-# docstring). templates itself no longer lives here: every reader
-# (Extractor) and writer (define_template()) now takes it as an
-# explicit argument instead.
-redirects = {}
-
 
 def resolve_template_page(title, page):
     """
@@ -2564,17 +2560,18 @@ def resolve_template_page(title, page):
     return ('template', text)
 
 
-def define_template(title, page, templates):
+def define_template(title, page, templates, redirects):
     """
-    Adds a template defined in the :param page: to :param templates:.
-    :param templates: the {title: text} dict to populate -- required,
-        not defaulted, since this function's entire job is writing
-        into it; a silent "if not given, use a throwaway empty dict"
-        default would make a forgotten argument fail silently (the
-        template is "defined" into a dict nobody keeps) rather than
-        loudly, which is worse than just requiring it.
+    Adds a template defined in the :param page: to :param templates:,
+    or a redirect to :param redirects:.
+    :param templates: the {title: text} dict to populate.
+    :param redirects: the {title: target_title} dict to populate.
+    Both required, not defaulted, since this function's entire job is
+    writing into one or the other; a silent "if not given, use a
+    throwaway empty dict" default would make a forgotten argument fail
+    silently (the page is "defined" into a dict nobody keeps) rather
+    than loudly, which is worse than just requiring it.
     """
-    global redirects
     result = resolve_template_page(title, page)
     if result is None:
         return

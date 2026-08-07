@@ -144,7 +144,6 @@ class ArticleExtractionContentTestCase(unittest.TestCase):
     def setUp(self):
         we.templateNamespace = ''
         ex.Extractor.templatePrefix = ''
-        ex.redirects.clear()
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         with io.StringIO(_ARTICLE_XML) as f:
@@ -161,16 +160,17 @@ class ArticleExtractionContentTestCase(unittest.TestCase):
 
     def extract_article(self, with_templates):
         templates = {}
+        redirects = {}
         if with_templates:
             with io.StringIO(_ARTICLE_XML) as f:
-                we.load_templates(f, templates=templates)
+                we.load_templates(f, templates=templates, redirects=redirects)
 
         with io.StringIO(_ARTICLE_XML) as f:
             pages = list(we.collect_pages(f))
         [(page_id, revid, title, page)] = [p for p in pages if p[2] == 'Geography']
 
         extractor = Extractor(page_id, revid, 'https://test.wikipedia.org/wiki?curid=1',
-                               title, page, templates=templates)
+                               title, page, templates=templates, redirects=redirects)
         return extractor.clean_text(''.join(page), expand_templates=True)
 
 

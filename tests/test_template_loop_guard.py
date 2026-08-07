@@ -58,9 +58,9 @@ class TemplateLoopGuardTestCase(unittest.TestCase):
 
     def setUp(self):
         self.templates = {}
+        self.redirects = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.redirects.clear()
         # Normally set by load_templates() when scanning a real dump's
         # first Template-namespace page; tests define templates directly
         # via define_template(), so it must be set explicitly here.
@@ -75,7 +75,7 @@ class TemplateLoopGuardTestCase(unittest.TestCase):
     def make_extractor(self, article_text, article_id=1, title="Test Article"):
         return Extractor(article_id, str(article_id),
                           f"https://test.wikipedia.org/wiki?curid={article_id}",
-                          title, [article_text], templates=self.templates)
+                          title, [article_text], templates=self.templates, redirects=self.redirects)
 
 
 class LegitimateSelfRecursionTests(TemplateLoopGuardTestCase):
@@ -92,7 +92,7 @@ class LegitimateSelfRecursionTests(TemplateLoopGuardTestCase):
         ex.define_template(
             "Template:P2",
             ["{{{1}}}{{#if:{{{2|}}}|, {{P2|{{{2|}}}|{{{3|}}}|{{{4|}}}|{{{5|}}}}}|}}"],
-            self.templates
+            self.templates, self.redirects
         )
         article_text = "Population list: {{P2|CityA|CityB|CityC|CityD}}"
         extractor = self.make_extractor(article_text)
@@ -112,7 +112,7 @@ class LegitimateSelfRecursionTests(TemplateLoopGuardTestCase):
             "Template:P2",
             ["{{{1}}}{{#if:{{{2|}}}|, {{P2|{{{2|}}}|{{{3|}}}|{{{4|}}}|{{{5|}}}"
              "|{{{6|}}}|{{{7|}}}|{{{8|}}}}}|}}"],
-            self.templates
+            self.templates, self.redirects
         )
         article_text = ("{{P2|A|B|C|D|E|F|G|H}}")
         extractor = self.make_extractor(article_text)
@@ -152,7 +152,7 @@ Usage examples:
 {{Redirect-multi|3|A|B|C|use=x}}
 {{Redirect-multi|3|A|B|C|use=y}}
 {{Redirect-multi|3|A|B|C|use=z}}
-"""], self.templates)
+"""], self.templates, self.redirects)
         article_text = "Some article text.\n\n{{Redirect-multi|2|X|Y}}\n\nMore text."
         extractor = self.make_extractor(article_text)
 
@@ -176,7 +176,7 @@ Usage examples:
     def test_direct_immediate_self_reference_is_caught(self):
         # The simplest possible case: a template whose body invokes
         # itself with the exact same parameters, unconditionally.
-        ex.define_template("Template:Self", ["before {{Self|x}} after"], self.templates)
+        ex.define_template("Template:Self", ["before {{Self|x}} after"], self.templates, self.redirects)
         article_text = "{{Self|x}}"
         extractor = self.make_extractor(article_text)
 
@@ -201,7 +201,7 @@ class WarningLogDeduplicationTests(TemplateLoopGuardTestCase):
 {{Redirect-multi|3|A|B|C|use=x}}
 {{Redirect-multi|3|A|B|C|use=y}}
 {{Redirect-multi|3|A|B|C|use=z}}
-"""], self.templates)
+"""], self.templates, self.redirects)
         article_text = "{{Redirect-multi|2|X|Y}}"
         extractor = self.make_extractor(article_text)
 
@@ -233,7 +233,7 @@ class ErrorSummaryReportingTests(TemplateLoopGuardTestCase):
     """
 
     def test_loop_errs_included_in_summary_when_present(self):
-        ex.define_template("Template:Self", ["{{Self|x}}"], self.templates)
+        ex.define_template("Template:Self", ["{{Self|x}}"], self.templates, self.redirects)
         article_text = "{{Self|x}}"
         extractor = self.make_extractor(article_text)
 
@@ -255,7 +255,7 @@ class ErrorSummaryReportingTests(TemplateLoopGuardTestCase):
                       "per-article error summary should report the loop count")
 
     def test_no_spurious_errors_reported_for_clean_article(self):
-        ex.define_template("Template:Plain", ["just plain text"], self.templates)
+        ex.define_template("Template:Plain", ["just plain text"], self.templates, self.redirects)
         article_text = "{{Plain}}"
         extractor = self.make_extractor(article_text)
 

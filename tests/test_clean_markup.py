@@ -22,7 +22,6 @@ class CleanMarkupTests(unittest.TestCase):
 
     def setUp(self):
         ex.Extractor.templatePrefix = 'Template:'
-        ex.redirects.clear()
         # Reset to the real default set before every test, restore
         # after -- don't depend on what state some other test file
         # (e.g. test_article_mode.py) left in this shared list.
@@ -76,7 +75,7 @@ class CleanMarkupTests(unittest.TestCase):
         # expand_templates=False -- a template call should survive
         # unexpanded (or vanish if it's the only content on its own
         # line, per test_article_extraction_content.py).
-        ex.define_template('Template:Greeting', ['Hello, {{{1}}}!'], {})
+        ex.define_template('Template:Greeting', ['Hello, {{{1}}}!'], {}, {})
         markup = "Intro text. {{Greeting|World}} Trailing text."
         result = list(clean_markup(markup))
         joined = ' '.join(result)

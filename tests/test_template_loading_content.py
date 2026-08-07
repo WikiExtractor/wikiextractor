@@ -128,7 +128,6 @@ class TemplateLoadingContentTests(unittest.TestCase):
         # cross-test isolation risk in sharing this single load.
         we.templateNamespace = ''
         ex.Extractor.templatePrefix = ''
-        ex.redirects.clear()
         with io.StringIO(_TEMPLATES_XML) as f:
             for line in f:
                 m = we.tagRE.search(line)
@@ -141,8 +140,9 @@ class TemplateLoadingContentTests(unittest.TestCase):
                 elif tag == '/siteinfo':
                     break
         cls.templates = {}
+        cls.redirects = {}
         with io.StringIO(_TEMPLATES_XML) as f:
-            cls.count = we.load_templates(f, templates=cls.templates)
+            cls.count = we.load_templates(f, templates=cls.templates, redirects=cls.redirects)
 
     def test_reported_count_matches_every_page_including_the_redirect(self):
         # 6 <page> elements total: 5 real templates + 1 redirect --
@@ -163,7 +163,7 @@ class TemplateLoadingContentTests(unittest.TestCase):
             'Born: {{{birth|unknown}}}, Died: {{{death|unknown}}}')
 
     def test_redirect_page_recorded_as_a_redirect_not_a_template(self):
-        self.assertEqual(ex.redirects.get('Template:Old name'), 'Template:New name')
+        self.assertEqual(self.redirects.get('Template:Old name'), 'Template:New name')
         self.assertNotIn('Template:Old name', self.templates)
 
     def test_redirect_target_itself_is_an_ordinary_stored_template(self):

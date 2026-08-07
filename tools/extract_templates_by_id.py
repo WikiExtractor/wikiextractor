@@ -164,17 +164,18 @@ def discover_and_extract(wikiextractor_extract_module, page_texts, templates_pat
     ex.Extractor.templatePrefix = determine_template_prefix(templates_path)
 
     looked_up = set()
-    # Local, not a module attribute: extract.py no longer has a
-    # module-level `templates` global at all for assigning to
-    # ex.templates to mean anything -- both define_template() and
-    # Extractor() take their templates dict as an explicit argument
-    # now, so that's how this RecordingDict actually gets used, same
-    # as any other templates source. templateCache is gone entirely
-    # (Extractor._parse_template() is its own lru_cache-decorated
-    # function now, not a dict expandTemplate() ever checks
-    # membership against), so there's nothing to instrument there.
+    # Local, not a module attribute: extract.py no longer has
+    # module-level `templates`/`redirects` globals at all for
+    # assigning to ex.templates/ex.redirects to mean anything -- both
+    # define_template() and Extractor() take these as explicit
+    # arguments now, so that's how these RecordingDicts actually get
+    # used, same as any other templates/redirects source. templateCache
+    # is gone entirely (Extractor._parse_template() is its own
+    # lru_cache-decorated function now, not a dict expandTemplate()
+    # ever checks membership against), so there's nothing to
+    # instrument there.
     templates = RecordingDict(on_lookup=looked_up.add)
-    ex.redirects.clear()
+    redirects = RecordingDict(on_lookup=looked_up.add)
 
     loaded_pages = {}  # title -> original <page> text, for writing to --output
 
@@ -183,7 +184,8 @@ def discover_and_extract(wikiextractor_extract_module, page_texts, templates_pat
         for page_id, wikitext in page_texts.items():
             extractor = ex.Extractor(page_id, str(page_id),
                                       f"https://example.org/wiki?curid={page_id}",
-                                      f"Page{page_id}", [wikitext], templates=templates)
+                                      f"Page{page_id}", [wikitext], templates=templates,
+                                      redirects=redirects)
             try:
                 extractor.clean_text(wikitext, expand_templates=True)
             except Exception:
@@ -208,7 +210,7 @@ def discover_and_extract(wikiextractor_extract_module, page_texts, templates_pat
             loaded_pages[title] = page_text
             text_match = re.search(r'<text[^>]*>(.*?)</text>', page_text, re.DOTALL)
             page_lines = [text_match.group(1)] if text_match else ['']
-            ex.define_template(title, page_lines, templates)
+            ex.define_template(title, page_lines, templates, redirects)
     else:
         print(f"WARNING: stopped after {max_passes} passes -- possible deep "
               f"nesting or a circular reference", file=sys.stderr)

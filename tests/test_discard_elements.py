@@ -82,7 +82,6 @@ class DiscardElementsTestCase(unittest.TestCase):
     def setUp(self):
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.redirects.clear()
         ex.Extractor.templatePrefix = "Template:"
 
     def get_result(self, article_text):

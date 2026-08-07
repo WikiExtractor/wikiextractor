@@ -43,7 +43,6 @@ class TextFormatTestCase(unittest.TestCase):
     def setUp(self):
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.redirects.clear()
         ex.Extractor.templatePrefix = "Template:"
         # Reset all three output-format flags to their defaults; each
         # test sets only the ones it needs.

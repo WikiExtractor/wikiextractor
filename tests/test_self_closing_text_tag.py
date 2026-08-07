@@ -203,15 +203,23 @@ class TemplateContaminationTests(unittest.TestCase):
 
     def setUp(self):
         self.templates = {}
+        self.redirects = {}
         import wikiextractor.extract as ex
+        import wikiextractor.WikiExtractor as we
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.redirects.clear()
+        # load() below relies on load_templates()'s self-bootstrap
+        # namespace detection, which only ever fires once per process
+        # (while we.templateNamespace is still falsy) -- reset both
+        # here so this doesn't silently pick up a stale prefix left
+        # by some other, unrelated test file's own dump data.
+        we.templateNamespace = ''
+        ex.Extractor.templatePrefix = ''
 
     def load(self, xml_text):
         import io
         import wikiextractor.WikiExtractor as we
-        we.load_templates(io.StringIO(xml_text), templates=self.templates)
+        we.load_templates(io.StringIO(xml_text), templates=self.templates, redirects=self.redirects)
 
     def test_template_after_blanked_template_is_not_contaminated(self):
         xml = '''<mediawiki>
@@ -255,11 +263,11 @@ class TemplateContaminationTests(unittest.TestCase):
         # it got there.
         import wikiextractor.extract as ex
         try:
-            ex.define_template('Template:Blanked', [], self.templates)
+            ex.define_template('Template:Blanked', [], self.templates, self.redirects)
         except IndexError:
             self.fail("define_template() crashed on a genuinely empty page list")
         self.assertNotIn('Template:Blanked', self.templates)
-        self.assertNotIn('Template:Blanked', ex.redirects)
+        self.assertNotIn('Template:Blanked', self.redirects)
 
 
 if __name__ == '__main__':

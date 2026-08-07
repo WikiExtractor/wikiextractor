@@ -59,30 +59,30 @@ class RedirectKeywordsTestCase(unittest.TestCase):
 
     def setUp(self):
         self.templates = {}
+        self.redirects = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.redirects.clear()
 
 
 class EnglishRedirectStillWorksTests(RedirectKeywordsTestCase):
     """Regression coverage for the original, pre-existing behavior."""
 
     def test_uppercase_redirect(self):
-        ex.define_template('Template:Foo', ['#REDIRECT [[Template:Bar]]'], self.templates)
-        self.assertEqual(ex.redirects.get('Template:Foo'), 'Template:Bar')
+        ex.define_template('Template:Foo', ['#REDIRECT [[Template:Bar]]'], self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('Template:Foo'), 'Template:Bar')
         self.assertNotIn('Template:Foo', self.templates)
 
     def test_lowercase_redirect_case_insensitive(self):
-        ex.define_template('Template:Foo', ['#redirect [[Template:Bar]]'], self.templates)
-        self.assertEqual(ex.redirects.get('Template:Foo'), 'Template:Bar')
+        ex.define_template('Template:Foo', ['#redirect [[Template:Bar]]'], self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('Template:Foo'), 'Template:Bar')
 
     def test_mixed_case_redirect(self):
-        ex.define_template('Template:Foo', ['#Redirect [[Template:Bar]]'], self.templates)
-        self.assertEqual(ex.redirects.get('Template:Foo'), 'Template:Bar')
+        ex.define_template('Template:Foo', ['#Redirect [[Template:Bar]]'], self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('Template:Foo'), 'Template:Bar')
 
     def test_normal_non_redirect_template_unaffected(self):
-        ex.define_template('Template:Normal', ['Some ordinary template text.'], self.templates)
-        self.assertIsNone(ex.redirects.get('Template:Normal'))
+        ex.define_template('Template:Normal', ['Some ordinary template text.'], self.templates, self.redirects)
+        self.assertIsNone(self.redirects.get('Template:Normal'))
         self.assertIn('Template:Normal', self.templates)
 
 
@@ -90,8 +90,8 @@ class SindhiRedirectTests(RedirectKeywordsTestCase):
     """The new behavior this fix adds."""
 
     def test_sindhi_redirect_keyword(self):
-        ex.define_template('سانچو:حوالا', ['#چوريو [[سانچو:حوالو]]'], self.templates)
-        self.assertEqual(ex.redirects.get('سانچو:حوالا'), 'سانچو:حوالو')
+        ex.define_template('سانچو:حوالا', ['#چوريو [[سانچو:حوالو]]'], self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('سانچو:حوالا'), 'سانچو:حوالو')
         self.assertNotIn('سانچو:حوالا', self.templates)
 
     def test_real_world_case_content_leak_is_gone(self):
@@ -103,8 +103,8 @@ class SindhiRedirectTests(RedirectKeywordsTestCase):
             '#چوريو [[سانچو:حوالو]]\n'
             '<div class="reflist" style="list-style-type: decimal;">\n'
             '{{#tag:references}}</div>'
-        ], self.templates)
-        self.assertEqual(ex.redirects.get('سانچو:حوالا'), 'سانچو:حوالو')
+        ], self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('سانچو:حوالا'), 'سانچو:حوالو')
         self.assertNotIn('سانچو:حوالا', self.templates)
 
 
@@ -138,8 +138,8 @@ class UrduRedirectTests(RedirectKeywordsTestCase):
     """
 
     def test_urdu_redirect_keyword(self):
-        ex.define_template('سانچہ:ص.م/فتح', ['#رجوع_مکرر [[سانچہ:خانہ معلومات/آغاز]]'], self.templates)
-        self.assertEqual(ex.redirects.get('سانچہ:ص.م/فتح'), 'سانچہ:خانہ معلومات/آغاز')
+        ex.define_template('سانچہ:ص.م/فتح', ['#رجوع_مکرر [[سانچہ:خانہ معلومات/آغاز]]'], self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('سانچہ:ص.م/فتح'), 'سانچہ:خانہ معلومات/آغاز')
         self.assertNotIn('سانچہ:ص.م/فتح', self.templates)
 
     def test_real_world_case_table_leak_is_gone(self):
@@ -147,14 +147,26 @@ class UrduRedirectTests(RedirectKeywordsTestCase):
         # actually available, the infobox's "{|" opener is reached and
         # the header row it should have wrapped gets correctly dropped
         # -- rather than leaking verbatim as in the real case above.
-        ex.define_template('سانچہ:ص.م/فتح', ['#رجوع_مکرر [[سانچہ:خانہ معلومات/آغاز]]'], self.templates)
-        ex.define_template('سانچہ:خانہ معلومات/آغاز', ['{| class="infobox"'], self.templates)
-        ex.define_template('سانچہ:خانہ معلومات/اختتام', ['|}'], self.templates)
-        ex.define_template('سانچہ:خ۔م/عنوان', ['! scope=col | {{{1}}}'], self.templates)
+        ex.define_template('سانچہ:ص.م/فتح', ['#رجوع_مکرر [[سانچہ:خانہ معلومات/آغاز]]'], self.templates, self.redirects)
+        ex.define_template('سانچہ:خانہ معلومات/آغاز', ['{| class="infobox"'], self.templates, self.redirects)
+        ex.define_template('سانچہ:خانہ معلومات/اختتام', ['|}'], self.templates, self.redirects)
+        ex.define_template('سانچہ:خ۔م/عنوان', ['! scope=col | {{{1}}}'], self.templates, self.redirects)
 
         wikitext = ('{{ص.م/فتح}}\n{{خ۔م/عنوان|Test}}\n{{خانہ معلومات/اختتام}}\n'
                     'Ordinary article prose follows.')
-        extractor = ex.Extractor('1', '1', 'https://x', 'Test', [wikitext], templates=self.templates)
+        # Real template resolution needs a real namespace prefix --
+        # never set elsewhere in this file, since every other test
+        # here checks define_template()'s own redirect detection
+        # directly rather than going through full expansion. Without
+        # this, fullyQualifiedTemplateTitle() falls back to no prefix
+        # at all, every lookup below misses, and this test would pass
+        # trivially regardless of whether redirects=self.redirects is
+        # even correct -- confirmed directly: without both this line
+        # and redirects=self.redirects on the next one, "scope=col"
+        # leaks through exactly as this test exists to catch.
+        ex.Extractor.templatePrefix = 'سانچہ:'
+        extractor = ex.Extractor('1', '1', 'https://x', 'Test', [wikitext],
+                                  templates=self.templates, redirects=self.redirects)
         result = extractor.clean_text(wikitext)
         joined = '\n'.join(result)
         self.assertNotIn('scope=col', joined)
@@ -169,18 +181,18 @@ class FalsePositiveBoundaryTests(RedirectKeywordsTestCase):
 
     def test_word_continuation_does_not_match(self):
         # "REDIRECTED" -- no word boundary right after "REDIRECT".
-        ex.define_template('Template:Foo', ['#REDIRECTED to a new place [[Template:Bar]]'], self.templates)
-        self.assertIsNone(ex.redirects.get('Template:Foo'))
+        ex.define_template('Template:Foo', ['#REDIRECTED to a new place [[Template:Bar]]'], self.templates, self.redirects)
+        self.assertIsNone(self.redirects.get('Template:Foo'))
         self.assertIn('Template:Foo', self.templates)
 
     def test_keyword_not_at_start_of_first_line_does_not_match(self):
-        ex.define_template('Template:Foo', ['Some text. #REDIRECT mentioned here [[Template:Bar]]'], self.templates)
-        self.assertIsNone(ex.redirects.get('Template:Foo'))
+        ex.define_template('Template:Foo', ['Some text. #REDIRECT mentioned here [[Template:Bar]]'], self.templates, self.redirects)
+        self.assertIsNone(self.redirects.get('Template:Foo'))
         self.assertIn('Template:Foo', self.templates)
 
     def test_keyword_with_no_wikilink_does_not_match(self):
-        ex.define_template('Template:Foo', ['#REDIRECT to somewhere, no link here'], self.templates)
-        self.assertIsNone(ex.redirects.get('Template:Foo'))
+        ex.define_template('Template:Foo', ['#REDIRECT to somewhere, no link here'], self.templates, self.redirects)
+        self.assertIsNone(self.redirects.get('Template:Foo'))
         self.assertIn('Template:Foo', self.templates)
 
     def test_keyword_appearing_only_in_a_later_line_does_not_match(self):
@@ -188,8 +200,8 @@ class FalsePositiveBoundaryTests(RedirectKeywordsTestCase):
         ex.define_template('Template:Foo', [
             'This is the real, first line of content.\n'
             '#REDIRECT [[Template:Bar]]\n'
-        ], self.templates)
-        self.assertIsNone(ex.redirects.get('Template:Foo'))
+        ], self.templates, self.redirects)
+        self.assertIsNone(self.redirects.get('Template:Foo'))
         self.assertIn('Template:Foo', self.templates)
 
 

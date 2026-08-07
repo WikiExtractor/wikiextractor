@@ -74,7 +74,6 @@ class LoadTemplatesOutputFileWhitespaceTests(unittest.TestCase):
     def setUp(self):
         we.templateNamespace = ''
         ex.Extractor.templatePrefix = ''
-        ex.redirects.clear()
         self._tmpdir = tempfile.mkdtemp()
         self.addCleanup(self._cleanup_tmpdir)
 

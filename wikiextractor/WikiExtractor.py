@@ -71,7 +71,7 @@ from multiprocessing import Queue, get_context, cpu_count, Value, Condition
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces, \
-    resolve_template_page, redirects
+    resolve_template_page
 from . import template_blob
 
 # ===========================================================================
@@ -221,7 +221,8 @@ tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*>(?:([^<]*)(<.*?>)?)?')
 #                    1     2               3      4
 
 
-def load_templates(file, output_file=None, encoding='utf-8', templates=None, blob_builder=None):
+def load_templates(file, output_file=None, encoding='utf-8', templates=None, redirects=None,
+                    blob_builder=None, redirects_blob_builder=None):
     """
     Load templates from :param file:.
     :param output_file: file where to save templates and modules.
@@ -235,11 +236,21 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, blo
         -- this function mutates it in place, same as
         define_template() itself always has, just one level up.
         Ignored when blob_builder is given.
+    :param redirects: the {title: target_title} dict to populate --
+        same defaulting and mutate-in-place behavior as templates
+        above. Ignored when redirects_blob_builder is given.
     :param blob_builder: a template_blob.StreamingTemplateBlobBuilder
         to stream parsed templates directly into instead of
         populating `templates` -- for a real, full-scale dump, this
         avoids ever holding a full {title: text} dict in memory at
         all (see StreamingTemplateBlobBuilder's own docstring).
+    :param redirects_blob_builder: the equivalent streaming builder
+        for redirects, populated alongside blob_builder in the same
+        pass. redirects is typically far smaller than templates, but
+        it's read the same way (an ordinary .get() on every template
+        expansion) and so is exposed to the identical fork/COW
+        privatization growth confirmed for templates itself -- see
+        template_blob.py's own module docstring.
     :return: number of templates loaded.
     """
     global templateNamespace
@@ -247,6 +258,8 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, blo
     modulePrefix = moduleNamespace + ':'
     if blob_builder is None and templates is None:
         templates = {}
+    if redirects_blob_builder is None and redirects is None:
+        redirects = {}
     articles = 0
     template_count = 0
     page = []
@@ -297,16 +310,16 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, blo
             page.append(line)
         elif tag == '/page':
             if title.startswith(Extractor.templatePrefix):
-                if blob_builder is not None:
+                if blob_builder is not None or redirects_blob_builder is not None:
                     result = resolve_template_page(title, page)
                     if result is not None:
                         kind, value = result
                         if kind == 'redirect':
-                            redirects[title] = value
+                            redirects_blob_builder.add(title, value)
                         else:
                             blob_builder.add(title, value)
                 else:
-                    define_template(title, page, templates)
+                    define_template(title, page, templates, redirects)
                 template_count += 1
             # save templates and modules to file
             if output_file and (title.startswith(Extractor.templatePrefix) or
@@ -488,46 +501,59 @@ def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interva
 
 
 def load_and_compact_templates(template_file, input_file, input):
-    """Loads templates (from template_file if given, else input_file
-    itself) and compacts them into a shared-memory-backed view.
+    """Loads templates and redirects (from template_file if given,
+    else input_file itself) and compacts each into its own
+    shared-memory-backed view.
 
-    Returns (template_blob_ctx, input) -- input is returned because,
-    when template_file isn't given, this scans and then re-opens
-    input_file itself, and the caller needs that updated handle.
+    Returns (template_blob_ctx, redirects_blob_ctx, input) -- input is
+    returned because, when template_file isn't given, this scans and
+    then re-opens input_file itself, and the caller needs that updated
+    handle.
 
-    Streams parsed templates directly into a
-    template_blob.StreamingTemplateBlobBuilder rather than building a
-    full {title: text} dict first and compacting it as a separate
-    pass -- at full EN scale (~900K templates), having both
-    representations resident at once meant this function's own peak
-    RSS was roughly double the size of the templates themselves,
-    confirmed directly on a real, memory-constrained production run
-    (mapper RSS: ~1.85GB after loading a plain dict, ~4.2GB once the
-    blob was also built alongside it -- and that ~1.85GB never fully
-    came back afterward either, even after the dict went out of scope
-    and an explicit gc.collect(): CPython's own allocator only returns
-    a fully-empty arena to the OS, and a dict with hundreds of
-    thousands of individually-allocated strings, built while other,
-    unrelated parsing allocations were happening at the same time,
-    left enough live stragglers scattered across arenas that most of
-    it stayed mapped). Streaming avoids the dict existing at all, so
-    there's nothing separate left to free or that can fail to be
-    freed -- the content blob's bytes are the only large allocation
-    made, once, directly.
+    Streams parsed templates and redirects directly into their own
+    template_blob.StreamingTemplateBlobBuilder rather than building
+    full dicts first and compacting them as a separate pass -- at full
+    EN scale (~900K templates), having both representations resident
+    at once meant this function's own peak RSS was roughly double the
+    size of the templates themselves, confirmed directly on a real,
+    memory-constrained production run (mapper RSS: ~1.85GB after
+    loading a plain dict, ~4.2GB once the blob was also built
+    alongside it -- and that ~1.85GB never fully came back afterward
+    either, even after the dict went out of scope and an explicit
+    gc.collect(): CPython's own allocator only returns a fully-empty
+    arena to the OS, and a dict with hundreds of thousands of
+    individually-allocated strings, built while other, unrelated
+    parsing allocations were happening at the same time, left enough
+    live stragglers scattered across arenas that most of it stayed
+    mapped). Streaming avoids the dict existing at all, so there's
+    nothing separate left to free or that can fail to be freed -- the
+    content blob's bytes are the only large allocation made, once,
+    directly.
+
+    redirects gets the identical treatment for a different reason:
+    it's typically far smaller than templates, but it's read the same
+    way -- an ordinary .get() on every template expansion -- and is
+    exposed to the identical fork/COW privatization growth confirmed
+    directly for templates itself (measured: 500K ordinary .get()
+    calls against a 200K-entry plain dict left 26.9MB of Private_Dirty
+    behind in a worker that never wrote to it directly at all).
     """
     builder = template_blob.StreamingTemplateBlobBuilder()
+    redirects_builder = template_blob.StreamingTemplateBlobBuilder()
     template_load_start = default_timer()
     if template_file and os.path.exists(template_file):
         logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
         file = decode_open(template_file)
-        template_count = load_templates(file, blob_builder=builder)
+        template_count = load_templates(file, blob_builder=builder,
+                                         redirects_blob_builder=redirects_builder)
         file.close()
     else:
         if input_file == '-':
             # can't scan then reset stdin; must error w/ suggestion to specify template_file
             raise ValueError("to use templates with stdin dump, must supply explicit template-file")
         logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
-        template_count = load_templates(input, template_file, blob_builder=builder)
+        template_count = load_templates(input, template_file, blob_builder=builder,
+                                         redirects_blob_builder=redirects_builder)
         input.close()
         input = decode_open(input_file)
     logging.info("Loaded %d templates in %.1fs", template_count, default_timer() - template_load_start)
@@ -535,15 +561,17 @@ def load_and_compact_templates(template_file, input_file, input):
     # See template_blob.py's own module docstring for why compaction
     # itself is necessary (fork()'s copy-on-write doesn't protect a
     # dict of Python objects the way it looks like it should).
-    # template_blob_ctx gets threaded through explicitly to
-    # extract_process() below (and to the single-article path in
-    # main()), which construct their own CompactedTemplates and pass
-    # it directly into each Extractor(..., templates=...).
+    # template_blob_ctx/redirects_blob_ctx get threaded through
+    # explicitly to extract_process() below (and to the single-article
+    # path in main()), which construct their own CompactedTemplates
+    # views and pass them directly into each
+    # Extractor(..., templates=..., redirects=...).
     compact_start = default_timer()
     template_blob_ctx = template_blob.compact_blobs(*builder.finish())
-    logging.info("Compacted templates into shared memory in %.1fs",
+    redirects_blob_ctx = template_blob.compact_blobs(*redirects_builder.finish())
+    logging.info("Compacted templates and redirects into shared memory in %.1fs",
                  default_timer() - compact_start)
-    return template_blob_ctx, input
+    return template_blob_ctx, redirects_blob_ctx, input
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
@@ -593,13 +621,16 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             break
 
     if expand_templates:
-        template_blob_ctx, input = load_and_compact_templates(template_file, input_file, input)
+        template_blob_ctx, redirects_blob_ctx, input = load_and_compact_templates(
+            template_file, input_file, input)
     else:
         # nullcontext, not None -- keeps the with-statement below
         # uniform regardless of whether templates are in play at all,
         # rather than needing a separate branch for --no-templates.
         template_blob_ctx = contextlib.nullcontext((None, None))
-    with template_blob_ctx as (_wrapper, template_blob_names):
+        redirects_blob_ctx = contextlib.nullcontext((None, None))
+    with template_blob_ctx as (_wrapper, template_blob_names), \
+            redirects_blob_ctx as (_redirects_wrapper, redirects_blob_names):
         # process pages
         logging.info("Starting page extraction from %s.", input_file)
         extract_start = default_timer()
@@ -655,7 +686,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         for _ in range(max(1, process_count)):
             extractor = Process(target=extract_process,
                                 args=(jobs_queue, output_queue, html_safe, debug_map_reduce,
-                                      template_blob_names))
+                                      template_blob_names, redirects_blob_names))
             extractor.daemon = True  # only live while parent process lives
             extractor.start()
             workers.append(extractor)
@@ -723,7 +754,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False, template_blob_names=None):
+def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
+                     template_blob_names=None, redirects_blob_names=None):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
@@ -740,31 +772,33 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
         PAGE_START line -- that's exactly the page it's stuck on, with
         no need to infer it from surrounding pages or wait to see
         whether it was "just slow".
-    :param template_blob_names: names of the shared-memory segments
-        built by template_blob.compact() in process_dump(), or None
-        if extraction is running with --no-templates. Attached here,
-        once, at worker startup, inside a with-block so this worker's
-        own view is closed automatically when the loop below exits
-        (never unlinked, though -- that's the creator's job alone via
-        CompactedTemplatesOwner, since a worker unlinking the shared
-        segment would destroy it out from under any sibling worker
-        still using it). The resulting view is passed explicitly into
-        every Extractor(...) constructed below -- not assigned to the
-        extract module's own `templates` global, which used to be how
-        a worker's template source got set up. Passing it as a
-        constructor argument means extract.py's own behavior is
-        visible in extract.py itself (Extractor takes a templates
-        argument) rather than being silently swappable only from
-        here; it's also what's actually required once this worker
-        starts being launched via spawn instead of fork, which
-        inherits nothing implicitly at all -- doing it this way now
-        means extract_process()'s own body doesn't need to change
-        shape later for that transition.
+    :param template_blob_names: :param redirects_blob_names: names of
+        the shared-memory segments built by template_blob.compact() in
+        process_dump(), or None if extraction is running with
+        --no-templates. Attached here, once, at worker startup, inside
+        a with-block so this worker's own view is closed automatically
+        when the loop below exits (never unlinked, though -- that's
+        the creator's job alone via CompactedTemplatesOwner, since a
+        worker unlinking the shared segment would destroy it out from
+        under any sibling worker still using it). The resulting views
+        are passed explicitly into every Extractor(...) constructed
+        below -- not assigned to the extract module's own `templates`/
+        `redirects` globals, which used to be how a worker's source
+        for each got set up. Passing them as constructor arguments
+        means extract.py's own behavior is visible in extract.py
+        itself (Extractor takes templates/redirects arguments) rather
+        than being silently swappable only from here; it's also what's
+        actually required once this worker starts being launched via
+        spawn instead of fork, which inherits nothing implicitly at
+        all -- doing it this way now means extract_process()'s own
+        body doesn't need to change shape later for that transition.
     """
     configure_mapreduce_logging(debug_map_reduce)
     worker_ctx = (template_blob.attach(template_blob_names) if template_blob_names is not None
                   else contextlib.nullcontext(None))
-    with worker_ctx as worker_templates:
+    redirects_ctx = (template_blob.attach(redirects_blob_names) if redirects_blob_names is not None
+                      else contextlib.nullcontext(None))
+    with worker_ctx as worker_templates, redirects_ctx as worker_redirects:
         while True:
             job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
             if job:
@@ -773,7 +807,8 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
                 mapreduce_logger.debug("PAGE_START pid=%d ordinal=%d id=%s title=%r",
                                        os.getpid(), ordinal, page_id, title)
                 out = StringIO()  # memory buffer
-                Extractor(*job[:-1], templates=worker_templates).extract(out, html_safe)  # (id, urlbase, title, page)
+                Extractor(*job[:-1], templates=worker_templates,
+                          redirects=worker_redirects).extract(out, html_safe)  # (id, urlbase, title, page)
                 finish = time.time()
                 mapreduce_logger.debug(
                     "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r elapsed=%.2fs",
@@ -1006,13 +1041,16 @@ def main():
 
     if args.article:
         def compact_article_templates(templates_path):
-            """Streams directly into a blob builder, same as
+            """Streams directly into blob builders, same as
             load_and_compact_templates() -- matches real behavior more
             closely, and --article exists partly to validate that."""
             builder = template_blob.StreamingTemplateBlobBuilder()
+            redirects_builder = template_blob.StreamingTemplateBlobBuilder()
             with decode_open(templates_path) as file:
-                load_templates(file, blob_builder=builder)
-            return template_blob.compact_blobs(*builder.finish())
+                load_templates(file, blob_builder=builder,
+                                redirects_blob_builder=redirects_builder)
+            return (template_blob.compact_blobs(*builder.finish()),
+                    template_blob.compact_blobs(*redirects_builder.finish()))
 
         if args.templates and os.path.exists(args.templates):
             # Same compaction as process_dump() -- deliberately not a
@@ -1021,16 +1059,19 @@ def main():
             # exists partly to validate real behavior, and exercising
             # a different templates lookup mechanism here than what
             # real multiprocess runs use would defeat that.
-            article_templates_ctx = compact_article_templates(args.templates)
+            article_templates_ctx, article_redirects_ctx = compact_article_templates(args.templates)
         else:
             article_templates_ctx = contextlib.nullcontext((None, None))
+            article_redirects_ctx = contextlib.nullcontext((None, None))
 
-        with article_templates_ctx as (article_templates, _names):
+        with article_templates_ctx as (article_templates, _names), \
+                article_redirects_ctx as (article_redirects, _redirects_names):
             urlbase = ''
             with decode_open(input_file) as input:
                 for id, revid, title, page in collect_pages(input):
                     Extractor(id, revid, urlbase, title, page,
-                              templates=article_templates).extract(sys.stdout)
+                              templates=article_templates,
+                              redirects=article_redirects).extract(sys.stdout)
         return
 
     output_path = args.output

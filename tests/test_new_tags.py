@@ -60,7 +60,6 @@ class NewTagsTestCase(unittest.TestCase):
     def setUp(self):
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.redirects.clear()
 
     def get_result(self, text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1", "Test", [text])
