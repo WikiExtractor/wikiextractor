@@ -23,6 +23,7 @@ import html
 import json
 import ast
 import operator
+import warnings
 from functools import lru_cache
 from itertools import zip_longest
 from urllib.parse import quote as urlencode
@@ -1521,6 +1522,8 @@ class Extractor():
         self.template_title_errs = 0
         self.template_loop_errs = 0  # same (title, params) reappearing in its own expansion chain
         self.warned_loop_keys = set()  # (id, title) pairs already warned about, to avoid log spam
+        self.malformed_expr_errs = 0
+        self.warned_expr_keys = set()  # (id, expr) pairs already warned about, to avoid log spam
 
     def clean_text(self, text, mark_headers=False, expand_templates=True,
                    html_safe=True):
@@ -1583,9 +1586,11 @@ class Extractor():
                 self.recursion_exceeded_1_errs,
                 self.recursion_exceeded_2_errs,
                 self.recursion_exceeded_3_errs,
-                self.template_loop_errs)
+                self.template_loop_errs,
+                self.malformed_expr_errs)
         if any(errs):
-            logger.warning("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d) loop(%d)",
+            logger.warning("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d) "
+                         "loop(%d) expr(%d)",
                          self.title, self.id, *errs)
 
     # ----------------------------------------------------------------------
@@ -1791,7 +1796,8 @@ class Extractor():
             funct = title[:colon]
             parts[0] = title[colon + 1:].strip()  # side-effect (parts[0] not used later)
             # arguments after first are not evaluated
-            ret = callParserFunction(funct, parts, self.frame)
+            ret = callParserFunction(funct, parts, self.frame,
+                                      page_title=self.title, page_id=self.id, extractor=self)
             return self.expandTemplates(ret)
 
         title = fullyQualifiedTemplateTitle(title, self)
@@ -2228,6 +2234,13 @@ _SHARP_EXPR_COMPARISONS = {
     ast.GtE: operator.ge,
 }
 
+# The exact fallback sharp_expr() returns on any failure -- named here
+# (rather than repeating the literal) both to avoid duplicating it and
+# because sharp_expr() also checks incoming expr text for this exact
+# string, to detect a failed #expr's output being fed as literal input
+# into an enclosing #expr call (see sharp_expr()'s own except block).
+_SHARP_EXPR_ERROR_SPAN = '<span class="error"></span>'
+
 
 def _sharp_expr_eval_node(node):
     """
@@ -2318,16 +2331,71 @@ def _sharp_expr_eval_node(node):
     raise ValueError(f"disallowed #expr element: {type(node).__name__}")
 
 
-def sharp_expr(expr):
+def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
     try:
+        orig_expr = expr
         expr = re.sub('=', '==', expr)
-        expr = re.sub('mod', '%', expr)
+        expr = re.sub(r'\bmod\b', '%', expr)
         expr = re.sub(r'\bdiv\b', '/', expr)
         expr = re.sub(r'\bround\b', '|ROUND|', expr)
-        tree = ast.parse(expr, mode='eval')
+        # Malformed #expr input -- number directly adjacent to a
+        # Python keyword, e.g. "3 in 5" -> "3in5" -- makes ast.parse()
+        # emit SyntaxWarning: invalid decimal literal as a side effect
+        # of tokenizing, even though the parse still correctly fails
+        # right after and gets caught below. Wikitext isn't Python
+        # source and was never going to satisfy Python's tokenizer
+        # rules; this warning has nothing to tell a reader here --
+        # the article-identifying warning logged in the except branch
+        # below is what's actually useful for finding and fixing the
+        # real, on-wiki #expr call this came from.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', SyntaxWarning)
+            tree = ast.parse(expr, mode='eval')
         return str(_sharp_expr_eval_node(tree))
     except Exception:
-        return '<span class="error"></span>'
+        # The same malformed #expr call is frequently invoked many
+        # times over within a single article (e.g. once per row of a
+        # table built from a broken shared template) -- one genuine
+        # occurrence can otherwise produce hundreds of identical log
+        # lines. Same dedup shape as expandTemplate()'s own loop
+        # detection: count every occurrence, but only log the first
+        # one per (article, expression) pair.
+        #
+        # A second, distinct source of noise this same dedup can't
+        # catch: nested #expr calls, e.g. {{#expr:{{#expr:X-1}}+1}},
+        # where an inner failure's own _SHARP_EXPR_ERROR_SPAN output
+        # gets substituted as literal text into the enclosing #expr's
+        # input, which then also fails (a span tag isn't numeric).
+        # Distinct cascades within the same article are each reported
+        # only once.
+        if _SHARP_EXPR_ERROR_SPAN in orig_expr:
+            if extractor is not None:
+                extractor.malformed_expr_errs += 1
+                cascadeKey = (page_id, 'cascade')
+                if cascadeKey in extractor.warned_expr_keys:
+                    return _SHARP_EXPR_ERROR_SPAN
+                extractor.warned_expr_keys.add(cascadeKey)
+            if page_title is not None:
+                logger.warning("Malformed #expr: %r (article %s, id %s) -- this looks like "
+                               "a chain of nested #expr calls; further such chained failures "
+                               "in this article are counted but not logged",
+                               orig_expr, page_title, page_id)
+            else:
+                logger.warning("Malformed #expr: %r", orig_expr)
+            return _SHARP_EXPR_ERROR_SPAN
+        if extractor is not None:
+            extractor.malformed_expr_errs += 1
+            exprKey = (page_id, orig_expr)
+            if exprKey in extractor.warned_expr_keys:
+                return _SHARP_EXPR_ERROR_SPAN
+            extractor.warned_expr_keys.add(exprKey)
+        if page_title is not None:
+            logger.warning("Malformed #expr: %r (article %s, id %s) -- further identical "
+                           "occurrences in this article are counted but not logged",
+                           orig_expr, page_title, page_id)
+        else:
+            logger.warning("Malformed #expr: %r", orig_expr)
+        return _SHARP_EXPR_ERROR_SPAN
 
 
 def sharp_if(testValue, valueIfTrue, valueIfFalse=None, *args):
@@ -2458,7 +2526,10 @@ def sharp_invoke(module, function, frame):
 
 parserFunctions = {
 
-    '#expr': sharp_expr,
+    # '#expr' is handled directly in callParserFunction(), same as
+    # '#invoke' below it, not dispatched through this dict -- it
+    # needs page_title/page_id threaded through for its own failure
+    # logging, which no other entry here needs.
 
     '#if': sharp_if,
 
@@ -2501,12 +2572,25 @@ parserFunctions = {
 }
 
 
-def callParserFunction(functionName, args, frame):
+def callParserFunction(functionName, args, frame, page_title=None, page_id=None, extractor=None):
     """
     Parser functions have similar syntax as templates, except that
     the first argument is everything after the first colon.
     :param functionName: nameof the parser function
     :param args: the arguments to the function
+    :param page_title: :param page_id: the calling article's own
+        title/id (not necessarily the template's -- a #expr call
+        reached here may live inside a transcluded template, but the
+        article is what a real investigation would start from anyway,
+        and it's what's actually available here). Threaded through to
+        #expr specifically, which logs them on failure to make a
+        malformed on-wiki call findable; no other parser function
+        currently needs them.
+    :param extractor: the calling Extractor, threaded through to
+        #expr specifically for its own per-article malformed-#expr
+        counting/dedup (see sharp_expr()'s own docstring) -- same
+        reasoning as page_title/page_id above, no other parser
+        function currently needs it.
     :return: the result of the invocation, None in case of failure.
 
     http://meta.wikimedia.org/wiki/Help:ParserFunctions
@@ -2518,6 +2602,8 @@ def callParserFunction(functionName, args, frame):
             ret = sharp_invoke(args[0].strip(), args[1].strip(), frame)
             # logger.debug('parserFunction> %s %s', args[1], ret)
             return ret
+        if functionName == '#expr':
+            return sharp_expr(*args, page_title=page_title, page_id=page_id, extractor=extractor)
         if functionName in parserFunctions:
             ret = parserFunctions[functionName](*args)
             # logger.debug('parserFunction> %s(%s) %s', functionName, args, ret)
