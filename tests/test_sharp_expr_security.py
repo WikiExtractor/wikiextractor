@@ -182,6 +182,25 @@ class SharpExprLegitimateUseTests(unittest.TestCase):
         self.assertEqual(ex.sharp_expr("10 mod 3"), "1")
         self.assertEqual(ex.sharp_expr("10 div 4"), "2.5")
 
+    def test_mod_keyword_has_a_word_boundary_like_div_and_round_already_did(self):
+        # "mod" used to be substituted without \b (unlike div/round,
+        # which already had it): "1 mod2" (no space before the second
+        # operand) would have silently matched anyway -- 'd' and '2'
+        # are both word characters, so even \b wouldn't treat that as
+        # a real boundary -- producing "1 %2", which Python happily
+        # evaluates to 1. That's a real, silently wrong answer for
+        # input that was never actually valid #expr mod syntax at all.
+        # Confirmed this now correctly fails to parse instead.
+        result = ex.sharp_expr("1 mod2")
+        self.assertNotEqual(result, "1")
+        self.assertEqual(result, '<span class="error"></span>')
+
+    def test_mod_as_a_substring_of_another_word_is_left_alone(self):
+        # Same underlying fix, the more common real-world shape: a
+        # word that merely contains "mod" (leaked-through wikitext, a
+        # stray word) must not get mangled mid-word.
+        self.assertEqual(ex.sharp_expr("commodity 5"), ex.sharp_expr("xyz 5"))
+
     def test_equality_and_comparison(self):
         self.assertEqual(ex.sharp_expr("5 = 5"), "1")
         self.assertEqual(ex.sharp_expr("3 < 5 and 5 < 10"), "1")

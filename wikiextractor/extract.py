@@ -2335,7 +2335,7 @@ def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
     try:
         orig_expr = expr
         expr = re.sub('=', '==', expr)
-        expr = re.sub('mod', '%', expr)
+        expr = re.sub(r'\bmod\b', '%', expr)
         expr = re.sub(r'\bdiv\b', '/', expr)
         expr = re.sub(r'\bround\b', '|ROUND|', expr)
         # Malformed #expr input -- number directly adjacent to a
