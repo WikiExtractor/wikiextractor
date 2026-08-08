@@ -62,12 +62,13 @@ import bz2
 import contextlib
 import logging
 import os.path
+import platform
 import re  # TODO use regex when it will be standard
 import sys
 import threading
 import time
 from io import StringIO
-from multiprocessing import Queue, get_context, cpu_count, Value, Condition
+from multiprocessing import get_context, cpu_count
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, \
@@ -112,6 +113,20 @@ def configure_mapreduce_logging(enabled):
             '%(levelname)s: %(asctime)s %(message)s'))
         mapreduce_logger.addHandler(handler)
     mapreduce_logger.propagate = False
+
+
+def configure_root_logging(log_level):
+    """
+    Sets the root logger's own level and format -- same reasoning and
+    same required call sites as configure_mapreduce_logging() above
+    (start of extract_process() and reduce_process(), not just once in main()).
+
+    On a spawn, main()'s own logging.basicConfig()/logger.setLevel() calls
+    never ran in that process at all, so this call sets up the logging
+    for the children processes.
+    """
+    logging.basicConfig(format='%(levelname)s: %(message)s')
+    logging.getLogger().setLevel(log_level)
 
 ##
 # The namespace used for template definitions
@@ -592,7 +607,7 @@ def load_and_compact_templates(template_file, input_file, input, template_prefix
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
                  process_count, html_safe, expand_templates=True, debug_map_reduce=False,
-                 extractor_kwargs=None):
+                 extractor_kwargs=None, log_level=logging.WARNING):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -615,6 +630,11 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         every worker and every Extractor(...) constructed anywhere in
         this run -- no piece of it is a shared global read implicitly
         by anything.
+    :param log_level: the root logger's own level, as set up in
+        main() -- passed through to reduce_process()/extract_process()
+        so each can reapply it via configure_root_logging(), since
+        main()'s own logging.basicConfig()/logger.setLevel() calls
+        never run in a process started via "spawn" at all.
     """
     extractor_kwargs = dict(extractor_kwargs) if extractor_kwargs else {}
 
@@ -672,13 +692,42 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         # Parallel Map/Reduce:
         # - pages to be processed are dispatched to workers
         # - a reduce process collects the results, sort them and print them.
-
-        # fixes MacOS error: TypeError: cannot pickle '_io.TextIOWrapper' object
-        Process = get_context("fork").Process
+        # - worker processes for each available CPU
+        #
+        # A single, explicit context for every multiprocessing object
+        # constructed below -- Process AND Queue/Value/Condition alike.
+        #
+        # "fork" specifically on non-Windows: real, measured startup
+        # savings (workers inherit the already-imported module via
+        # copy-on-write instead of each re-importing and
+        # re-compiling it fresh).
+        # Originally forced here to dodge a real MacOS pickle error
+        #   TypeError: cannot pickle '_io.TextIOWrapper' object
+        # but that particular issue is now fixed.
+        #
+        # "spawn" is Windows' only option
+        # (get_context("fork") raises ValueError there).
+        #
+        # Deliberately NOT using the plain, top-level
+        # Process/Queue/Value/Condition for any of these: those
+        # default to the *platform's own* default context, which
+        # happens to already match the explicit choice below on every
+        # platform this currently runs on -- but that's true only
+        # because it happens to be true today.
+        #
+        # It has already changed once in Python's own history (macOS's
+        # own default flipped from fork to spawn in 3.8, which is why
+        # the fork-forcing line above exists at all), and mixing an
+        # object built under one context with a Process started under
+        # a different one fails.  For example, this can produce:
+        # "RuntimeError: A SemLock created in a fork context is being
+        # shared with a process in a spawn context"
+        mp_context = get_context("spawn") if platform.system().startswith("Windows") else get_context("fork")
+        Process = mp_context.Process
 
         maxsize = 10 * process_count
         # output queue
-        output_queue = Queue(maxsize=maxsize)
+        output_queue = mp_context.Queue(maxsize=maxsize)
 
         # Shared counter reduce_process updates every time it successfully
         # writes an ordinal out, so the mapper below can tell how far
@@ -698,21 +747,22 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         # for one specific item while ignoring others ahead of it in the
         # queue -- pausing reduce_process's own consumption was tried and
         # reverted after it produced a genuine deadlock in testing).
-        next_ordinal_shared = Value('l', 0)
+        next_ordinal_shared = mp_context.Value('l', 0)
 
         # Notified by reduce_process every time next_ordinal_shared
         # advances, so the mapper's throttle below can genuinely wake up
         # on that specific event, rather than polling the value on some
         # fixed interval regardless of whether anything happened.
-        progress_condition = Condition()
+        progress_condition = mp_context.Condition()
 
         # Reduce job that sorts and prints output
         reduce = Process(target=reduce_process,
-                          args=(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition, debug_map_reduce))
+                          args=(output_queue, out_file, file_size, file_compress, next_ordinal_shared,
+                                progress_condition, debug_map_reduce, log_level))
         reduce.start()
 
         # initialize jobs queue
-        jobs_queue = Queue(maxsize=maxsize)
+        jobs_queue = mp_context.Queue(maxsize=maxsize)
 
         # start worker processes
         logging.info("Using %d extract processes.", process_count)
@@ -720,7 +770,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         for _ in range(max(1, process_count)):
             extractor = Process(target=extract_process,
                                 args=(jobs_queue, output_queue, html_safe, debug_map_reduce,
-                                      template_blob_names, redirects_blob_names, extractor_kwargs))
+                                      template_blob_names, redirects_blob_names, extractor_kwargs,
+                                      log_level))
             extractor.daemon = True  # only live while parent process lives
             extractor.start()
             workers.append(extractor)
@@ -789,7 +840,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
 
 def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
-                     template_blob_names=None, redirects_blob_names=None, extractor_kwargs=None):
+                     template_blob_names=None, redirects_blob_names=None, extractor_kwargs=None,
+                     log_level=logging.WARNING):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
@@ -835,8 +887,15 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
         these used to be a module- or class-level global a worker
         picked up implicitly (several genuinely broken that way -- see
         Extractor's own docstring), now plain, explicit arguments.
+    :param log_level: this process's own root logger level (see
+        configure_root_logging()) -- without this, template/#expr
+        warnings still show (they're already at WARNING, Python's own
+        default), but this worker's part of any INFO-level diagnostics
+        would silently be lost under "spawn", same underlying cause as
+        debug_map_reduce/mapreduce_logger above.
     """
     extractor_kwargs = extractor_kwargs or {}
+    configure_root_logging(log_level)
     configure_mapreduce_logging(debug_map_reduce)
     worker_ctx = (template_blob.attach(template_blob_names) if template_blob_names is not None
                   else contextlib.nullcontext(None))
@@ -864,7 +923,8 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
                 break
 
 
-def reduce_process(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition, debug_map_reduce=False):
+def reduce_process(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition,
+                    debug_map_reduce=False, log_level=logging.WARNING):
     """
     Pull finished article text, write series of files (or stdout)
     :param output_queue: text to be output.
@@ -883,6 +943,12 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
         enabled, logs REDUCER_PROGRESS for every page written (ordinal,
         current buffer depth) -- shares the same logger as the workers'
         PAGE_START/PAGE_TIMING logging.
+    :param log_level: this process's own root logger level (see
+        configure_root_logging()) -- without this, every ordinary
+        logging.info()/logging.warning() call below (progress lines,
+        REDUCER_EXIT status) silently stops appearing under "spawn",
+        since main()'s own level-setting code never runs in this
+        process at all.
 
     Builds its own output/OutputSplitter here, rather than receiving
     an already-open one constructed by the parent process: an open
@@ -898,6 +964,7 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
     On exit, always logs the status of the exit (except in the case
     of a SIGKILL)
     """
+    configure_root_logging(log_level)
     configure_mapreduce_logging(debug_map_reduce)
     if out_file == '-':
         output = sys.stdout
@@ -1073,10 +1140,12 @@ def main():
     logging.basicConfig(format=FORMAT)
 
     logger = logging.getLogger()
+    log_level = logging.WARNING  # Python's own default
     if not args.quiet:
-        logger.setLevel(logging.INFO)
+        log_level = logging.INFO
     if args.debug:
-        logger.setLevel(logging.DEBUG)
+        log_level = logging.DEBUG
+    logger.setLevel(log_level)
 
     if args.json:
         logger.debug("Outputting to json format")
@@ -1141,7 +1210,7 @@ def main():
     configure_mapreduce_logging(args.debug_map_reduce)
     process_dump(input_file, args.templates, output_path, file_size,
                  args.compress, args.processes, args.html_safe, not args.no_templates,
-                 args.debug_map_reduce, extractor_kwargs=extractor_kwargs)
+                 args.debug_map_reduce, extractor_kwargs=extractor_kwargs, log_level=log_level)
 
 if __name__ == '__main__':
     main()
