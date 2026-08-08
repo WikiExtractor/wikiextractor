@@ -60,19 +60,16 @@ class ColonInTitleTests(unittest.TestCase):
 
     def setUp(self):
         # Same reasoning as test_collect_pages_redirect.py: collect_pages()
-        # relies on these module-level globals, normally populated from the
-        # dump's own <siteinfo> section -- set them explicitly so the test
+        # relies on this module-level global, normally populated from the
+        # dump's own <siteinfo> section -- set it explicitly so the test
         # doesn't depend on whatever a prior test left behind.
         self._orig_namespace = we.templateNamespace
-        self._orig_accepted = we.acceptedNamespaces
         we.templateNamespace = 'Template'
-        we.acceptedNamespaces = set(['w'])
         self.tmpdir = os.path.dirname(os.path.abspath(__file__))
         self._paths = []
 
     def tearDown(self):
         we.templateNamespace = self._orig_namespace
-        we.acceptedNamespaces = self._orig_accepted
         for path in self._paths:
             if os.path.exists(path):
                 os.remove(path)
@@ -194,13 +191,11 @@ class ColonInTitleTests(unittest.TestCase):
         self.assertNotIn('Talk:Some Article', titles)
 
     def test_ns_flag_still_controls_link_stripping_only(self):
-        # -ns/--namespaces is unchanged from its original behavior: it
-        # sets acceptedNamespaces, which only affects whether an
-        # in-body interwiki link is kept or stripped in extract.py. It
-        # has no effect on which pages collect_pages() yields -- confirm
-        # a non-'0' namespace stays excluded even when -ns is given a
-        # value that happens to name it.
-        we.acceptedNamespaces = set(['Category'])
+        # -ns/--namespaces (built into extractor_kwargs['acceptedNamespaces']
+        # in main(), then passed into each real Extractor) only affects
+        # whether an in-body interwiki link is kept or stripped in
+        # extract.py. It has no effect on which pages collect_pages()
+        # yields -- confirm a non-'0' namespace stays excluded regardless.
         xml = '''<mediawiki>
   <siteinfo><sitename>Test</sitename></siteinfo>
   <page>

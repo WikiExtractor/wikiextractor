@@ -49,7 +49,14 @@ syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlig
 ##
 # Defined in <siteinfo>
 # We include as default Template, when loading external template file.
-knownNamespaces = set(['Template'])
+#
+# Static, import-time-only default -- never mutated after this point.
+# WikiExtractor.py used to reassign its own separately-imported copy of
+# this name from real siteinfo data, which never actually reached this,
+# the one Extractor instances really read (see Extractor.knownNamespaces
+# for the fix and the bug this used to be). Real, per-run values are
+# built explicitly in WikiExtractor.py and passed into each Extractor.
+_DEFAULT_KNOWN_NAMESPACES = frozenset(['Template'])
 
 ##
 # The #REDIRECT keyword, localized. MediaWiki's real redirect magic
@@ -105,7 +112,15 @@ discardElements = [
 # wiktionary: Wiki dictionary
 # wikt: shortcut for Wiktionary
 #
-acceptedNamespaces = ['w', 'wiktionary', 'wikt']
+# Static, import-time-only default -- never mutated after this point.
+# WikiExtractor.py used to reassign its own separately-imported copy of
+# this name from --namespaces, which (via `from .extract import
+# acceptedNamespaces` followed by a later reassignment) never actually
+# reached this, the one Extractor instances really read -- a plain
+# rebind of an imported name never propagates back to the defining
+# module. Real, per-run values are built explicitly in WikiExtractor.py
+# and passed into each Extractor.
+_DEFAULT_ACCEPTED_NAMESPACES = ('w', 'wiktionary', 'wikt')
 
 
 def get_url(urlbase, uid):
@@ -138,10 +153,10 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     text = dropNested(text, r'{\|', r'\|}')
 
     # replace external links
-    text = replaceExternalLinks(text)
+    text = replaceExternalLinks(text, extractor)
 
     # replace internal links
-    text = replaceInternalLinks(text)
+    text = replaceInternalLinks(text, extractor)
 
     # drop MagicWords behavioral switches
     text = magicWordsRE.sub('', text)
@@ -205,7 +220,7 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
             spans.append((m.start(), m.end()))
 
     # Drop ignored tags
-    for left, right in ignored_tag_patterns:
+    for left, right in extractor.ignored_tag_patterns:
         for m in left.finditer(text):
             spans.append((m.start(), m.end()))
         for m in right.finditer(text):
@@ -296,9 +311,11 @@ listItem = {'*': '<li>%s</li>', '#': '<li>%s</<li>', ';': '<dt>%s</dt>',
             ':': '<dd>%s</dd>'}
 
 
-def compact(text, mark_headers=False):
+def compact(text, mark_headers=False, extractor=None):
     """Deal with headers, lists, empty sections, residuals of tables.
     :param text: convert to HTML
+    :param extractor: the calling Extractor, for its own
+        HtmlFormatting/keepSections settings.
     """
 
     page = []  # list of paragraph
@@ -309,7 +326,7 @@ def compact(text, mark_headers=False):
     for line in text.split('\n'):
 
         if not line.strip():
-            if len(listLevel):    # implies Extractor.HtmlFormatting
+            if len(listLevel):    # implies extractor.HtmlFormatting
                 for c in reversed(listLevel):
                     page.append(listClose[c])
                     listLevel = ''
@@ -320,7 +337,7 @@ def compact(text, mark_headers=False):
         if m:
             title = m.group(2)
             lev = len(m.group(1))
-            if Extractor.HtmlFormatting:
+            if extractor.HtmlFormatting:
                 page.append("<h%d>%s</h%d>" % (lev, title, lev))
             if title and title[-1] not in '!?':
                 title += '.'
@@ -346,7 +363,7 @@ def compact(text, mark_headers=False):
         # handle lists
         # @see https://www.mediawiki.org/wiki/Help:Formatting
         elif line[0] in '*#;':
-            if Extractor.HtmlFormatting:
+            if extractor.HtmlFormatting:
                 # close extra levels
                 l = 0
                 for c in listLevel:
@@ -370,7 +387,7 @@ def compact(text, mark_headers=False):
                 page.append(listItem[type] % line)
             else:
                 continue
-        elif len(listLevel):    # implies Extractor.HtmlFormatting
+        elif len(listLevel):    # implies extractor.HtmlFormatting
             for c in reversed(listLevel):
                 page.append(listClose[c])
             listLevel = []
@@ -382,7 +399,7 @@ def compact(text, mark_headers=False):
         elif (line[0] == '(' and line[-1] == ')') or line.strip('.-') == '':
             continue
         elif len(headers):
-            if Extractor.keepSections:
+            if extractor.keepSections:
                 items = sorted(headers.items())
                 for (i, v) in items:
                     page.append(v)
@@ -498,7 +515,7 @@ EXT_IMAGE_REGEX = re.compile(
     re.X | re.S | re.U)
 
 
-def replaceExternalLinks(text):
+def replaceExternalLinks(text, extractor):
     s = ''
     cur = 0
     for m in ExtLinkBracketedRegex.finditer(text):
@@ -520,30 +537,32 @@ def replaceExternalLinks(text):
         # This happened by accident in the original parser, but some people used it extensively
         m = EXT_IMAGE_REGEX.match(label)
         if m:
-            label = makeExternalImage(label)
+            label = makeExternalImage(label, extractor)
 
         # Use the encoded URL
         # This means that users can paste URLs directly into the text
         # Funny characters like ö aren't valid in URLs anyway
         # This was changed in August 2004
-        s += makeExternalLink(url, label)  # + trail
+        s += makeExternalLink(url, label, extractor)  # + trail
 
     return s + text[cur:]
 
 
-def makeExternalLink(url, anchor):
+def makeExternalLink(url, anchor, extractor):
     """Function applied to wikiLinks"""
-    if Extractor.keepLinks:
+    if extractor.keepLinks:
         return '<a href="%s">%s</a>' % (urlencode(url), anchor)
     else:
         return anchor
 
 
-def makeExternalImage(url, alt=''):
-    if Extractor.keepLinks:
+def makeExternalImage(url, extractor, alt=''):
+    """Function applied to wikiLinks whose label is itself an image URL."""
+    if extractor.keepLinks:
         return '<img src="%s" alt="%s">' % (url, alt)
     else:
         return alt
+
 
 
 # ----------------------------------------------------------------------
@@ -808,7 +827,7 @@ def neutralizeUnclosedLinkOpens(text):
 LINK_OPEN_PLACEHOLDER = '\x00\x00'
 
 
-def replaceInternalLinks(text):
+def replaceInternalLinks(text, extractor):
     """
     Replaces external links of the form:
     [[title |...|label]]trail
@@ -846,21 +865,21 @@ def replaceInternalLinks(text):
                     pipe = last  # advance
                 curp = e1
             label = inner[pipe + 1:].strip()
-        res += text[cur:s] + makeInternalLink(title, label) + trail
+        res += text[cur:s] + makeInternalLink(title, label, extractor) + trail
         cur = end
     return (res + text[cur:]).replace(LINK_OPEN_PLACEHOLDER, '[[')
 
 
-def makeInternalLink(title, label):
+def makeInternalLink(title, label, extractor):
     colon = title.find(':')
-    if colon > 0 and title[:colon] not in acceptedNamespaces:
+    if colon > 0 and title[:colon] not in extractor.acceptedNamespaces:
         return ''
     if colon == 0:
         # drop also :File:
         colon2 = title.find(':', colon + 1)
-        if colon2 > 1 and title[colon + 1:colon2] not in acceptedNamespaces:
+        if colon2 > 1 and title[colon + 1:colon2] not in extractor.acceptedNamespaces:
             return ''
-    if Extractor.keepLinks:
+    if extractor.keepLinks:
         return '<a href="%s">%s</a>' % (urlencode(title), label)
     else:
         return label
@@ -1067,8 +1086,9 @@ ignoredTags = (
 placeholder_tags = {'math': 'formula', 'code': 'codice'}
 
 
-def normalizeTitle(title):
+def normalizeTitle(title, known_namespaces=None):
     """Normalize title"""
+    known_namespaces = known_namespaces if known_namespaces is not None else _DEFAULT_KNOWN_NAMESPACES
     # remove leading/trailing whitespace and underscores
     title = title.strip(' _')
     # replace sequences of whitespace and underscore chars with a single space
@@ -1084,7 +1104,7 @@ def normalizeTitle(title):
         rest = m.group(3)
 
         ns = normalizeNamespace(prefix)
-        if ns in knownNamespaces:
+        if ns in known_namespaces:
             # If the prefix designates a known namespace, then it might be
             # followed by optional whitespace that should be removed to get
             # the canonical page name
@@ -1134,23 +1154,26 @@ def unescape(text):
 # The buggy template {{Template:T}} has a comment terminating with just "->"
 comment = re.compile(r'<!--.*?-->', re.DOTALL)
 
-# Match ignored tags
-ignored_tag_patterns = []
-
 
 def ignoreTag(tag):
+    """Compiles and returns the (open, close) regex pair for a tag to
+    be dropped from output, including its content. A pure function --
+    doesn't append anywhere itself, unlike its old behavior -- so the
+    caller decides what list this belongs in (an Extractor's own
+    per-instance ignored_tag_patterns, most commonly)."""
     left = re.compile(r'<%s\b.*?>' % tag, re.IGNORECASE | re.DOTALL)  # both <ref> and <reference>
     right = re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE)  # space allowed, such as </span >
-    ignored_tag_patterns.append((left, right))
+    return (left, right)
 
 
-def resetIgnoredTags():
-    global ignored_tag_patterns
-    ignored_tag_patterns = []
-
-
-for tag in ignoredTags:
-    ignoreTag(tag)
+# Match ignored tags. Static, import-time-only default -- never mutated
+# after this point (ignoreTag() itself no longer mutates anything).
+# WikiExtractor.py builds its own per-run list, starting from a copy of
+# this default and adding 'a' when --links isn't given, and passes that
+# explicitly into each Extractor -- see clean.py's own clean_markup()
+# for the same pattern at smaller scale (add 'a' or don't, no shared
+# state to save/restore around it either way).
+_DEFAULT_IGNORED_TAG_PATTERNS = [ignoreTag(tag) for tag in ignoredTags]
 
 # Match selfClosing HTML tags
 selfClosing_tag_patterns = [
@@ -1430,33 +1453,11 @@ class Extractor():
     """
     An extraction task on a article.
     """
-    ##
-    # Whether to preserve links in output
-    keepLinks = False
 
-    ##
-    # Whether to preserve section titles
-    keepSections = True
-
-    ##
-    # Whether to output text with HTML formatting elements in <doc> files.
-    HtmlFormatting = False
-
-    ##
-    # Whether to produce json instead of the default <doc> output format.
-    to_json = False
-    # Whether to produce text instead of the default <doc> output format.
-    to_text = False
-
-    ##
-    # Whether or not to discard empty (title only) documents
-    discard_empty = False
-
-    ##
-    # Obtained from TemplateNamespace
-    templatePrefix = ''
-
-    def __init__(self, id, revid, urlbase, title, page, templates=None, redirects=None):
+    def __init__(self, id, revid, urlbase, title, page, templates=None, redirects=None,
+                 templatePrefix='', knownNamespaces=None, acceptedNamespaces=None,
+                 ignored_tag_patterns=None, keepLinks=False, keepSections=True,
+                 HtmlFormatting=False, to_json=False, to_text=False, discard_empty=False):
         """
         :param page: a list of lines.
         :param templates: the {title: text} template lookup this
@@ -1475,6 +1476,23 @@ class Extractor():
         :param redirects: the {title: target_title} redirect lookup,
             same shape and same defaulting behavior as templates
             above -- also no longer a module-level global.
+        :param templatePrefix: :param knownNamespaces: :param
+            acceptedNamespaces: :param ignored_tag_patterns: :param
+            keepLinks: :param keepSections: :param HtmlFormatting:
+            :param to_json: :param to_text: :param discard_empty:
+            all formerly module- or class-level shared state (some of
+            it, for knownNamespaces/acceptedNamespaces, genuinely
+            broken shared state -- see the module-level defaults
+            below for why), now plain constructor arguments instead,
+            for the same reason templates/redirects are: no global,
+            of any kind, for a spawned worker process to silently miss
+            inheriting. Each defaults to a fresh copy of this module's
+            own static, never-mutated-after-import default when not
+            given, so existing callers that don't care about these
+            (most unit tests) see unchanged behavior. A caller that
+            DOES need real, CLI-configured values (extract_process(),
+            the --article path) builds and passes its own values
+            explicitly -- see WikiExtractor.py's own build_extractor_kwargs().
         """
         self.id = id
         self.revid = revid
@@ -1483,6 +1501,18 @@ class Extractor():
         self.page = page
         self.templates = templates if templates is not None else {}
         self.redirects = redirects if redirects is not None else {}
+        self.templatePrefix = templatePrefix
+        self.knownNamespaces = knownNamespaces if knownNamespaces is not None else set(_DEFAULT_KNOWN_NAMESPACES)
+        self.acceptedNamespaces = (acceptedNamespaces if acceptedNamespaces is not None
+                                    else list(_DEFAULT_ACCEPTED_NAMESPACES))
+        self.ignored_tag_patterns = (ignored_tag_patterns if ignored_tag_patterns is not None
+                                      else list(_DEFAULT_IGNORED_TAG_PATTERNS))
+        self.keepLinks = keepLinks
+        self.keepSections = keepSections
+        self.HtmlFormatting = HtmlFormatting
+        self.to_json = to_json
+        self.to_text = to_text
+        self.discard_empty = discard_empty
         self.magicWords = MagicWords()
         self.frame = []
         self.recursion_exceeded_1_errs = 0  # template recursion within expandTemplates()
@@ -1511,7 +1541,7 @@ class Extractor():
         text = clean(self, text, expand_templates=expand_templates,
                      html_safe=html_safe)
 
-        text = compact(text, mark_headers=mark_headers)
+        text = compact(text, mark_headers=mark_headers, extractor=self)
         return text
 
     def extract(self, out, html_safe=True):
@@ -1764,7 +1794,7 @@ class Extractor():
             ret = callParserFunction(funct, parts, self.frame)
             return self.expandTemplates(ret)
 
-        title = fullyQualifiedTemplateTitle(title)
+        title = fullyQualifiedTemplateTitle(title, self)
         if not title:
             self.template_title_errs += 1
             return ''
@@ -2131,7 +2161,7 @@ def lcfirst(string):
         return ''
 
 
-def fullyQualifiedTemplateTitle(templateTitle):
+def fullyQualifiedTemplateTitle(templateTitle, extractor):
     """
     Determine the namespace of the page being included through the template
     mechanism
@@ -2145,7 +2175,7 @@ def fullyQualifiedTemplateTitle(templateTitle):
             # colon found but not in the first position - check if it
             # designates a known namespace
             prefix = normalizeNamespace(m.group(1))
-            if prefix in knownNamespaces:
+            if prefix in extractor.knownNamespaces:
                 return prefix + ucfirst(m.group(2))
     # The title of the page being included is NOT in the main namespace and
     # lacks any other explicit designation of the namespace - therefore, it
@@ -2159,7 +2189,7 @@ def fullyQualifiedTemplateTitle(templateTitle):
     # space]], but having in the system a redirect page with an empty title
     # causes numerous problems, so we'll live happier without it.
     if templateTitle:
-        return Extractor.templatePrefix + ucfirst(templateTitle)
+        return extractor.templatePrefix + ucfirst(templateTitle)
     else:
         return ''  # caller may log as error
 

@@ -38,13 +38,15 @@ import unittest
 sys.path.insert(0, '..')  # allow running directly from tests/ without installing
 
 import wikiextractor.extract as ex
+from wikiextractor.extract import Extractor
 
 
 class WhitespaceOnlySectionDroppedTests(unittest.TestCase):
 
     def test_heading_followed_only_by_whitespace_residue_is_dropped(self):
         text = 'Intro.\n\n==Heading==\n \n\n==Next Heading==\nReal content.'
-        result = ex.compact(text)
+        _extractor = Extractor(1, "1", "https://x", "Test", [text])
+        result = ex.compact(text, extractor=_extractor)
         self.assertNotIn('Heading.', result)
         self.assertIn('Next Heading.', result)
         self.assertIn('Real content.', result)
@@ -61,7 +63,8 @@ class WhitespaceOnlySectionDroppedTests(unittest.TestCase):
                 ' \n\n'
                 '===Tertiary sources===\n'
                 ' \n')
-        result = ex.compact(text)
+        _extractor = Extractor(1, "1", "https://x", "Test", [text])
+        result = ex.compact(text, extractor=_extractor)
         self.assertNotIn('References.', result)
         self.assertNotIn('General sources.', result)
         self.assertNotIn('Secondary sources.', result)
@@ -77,7 +80,8 @@ class NonEmptySectionsStillKeptTests(unittest.TestCase):
 
     def test_heading_with_real_content_survives(self):
         text = 'Intro.\n\n==Heading==\nReal, substantive content here.\n'
-        result = ex.compact(text)
+        _extractor = Extractor(1, "1", "https://x", "Test", [text])
+        result = ex.compact(text, extractor=_extractor)
         self.assertIn('Heading.', result)
         self.assertIn('Real, substantive content here.', result)
 
@@ -85,7 +89,8 @@ class NonEmptySectionsStillKeptTests(unittest.TestCase):
         # Even very short real content (not just whitespace) must
         # still count as non-empty.
         text = 'Intro.\n\n==See also==\nRelated topic\n'
-        result = ex.compact(text)
+        _extractor = Extractor(1, "1", "https://x", "Test", [text])
+        result = ex.compact(text, extractor=_extractor)
         self.assertIn('See also.', result)
         self.assertIn('Related topic', result)
 

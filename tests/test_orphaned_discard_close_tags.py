@@ -50,11 +50,11 @@ class OrphanedDiscardCloseTagTestCase(unittest.TestCase):
     def setUp(self):
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.Extractor.templatePrefix = "Template:"
+        self.templatePrefix = "Template:"
 
     def get_result(self, article_text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [article_text])
+                               "Test Article", [article_text], templatePrefix=self.templatePrefix)
         return extractor.clean_text(article_text, expand_templates=True)
 
 

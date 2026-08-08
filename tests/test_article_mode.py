@@ -40,7 +40,6 @@ import unittest
 sys.path.insert(0, '..')  # allow running directly from tests/ without installing
 
 import wikiextractor.WikiExtractor as we
-import wikiextractor.extract as ex
 
 # A minimal, realistic single-article dump, deliberately including
 # non-ASCII (Arabic-script) content alongside a template call, so a
@@ -100,20 +99,10 @@ class ArticleModeTestCase(unittest.TestCase):
 
         self._orig_argv = sys.argv
         self._orig_stdout = sys.stdout
-        # we.main() calls ignoreTag('a') unconditionally by default
-        # (Extractor.keepLinks defaults to False), permanently adding
-        # to extract.py's module-level ignored_tag_patterns with no
-        # matching cleanup of its own -- reasonable for a real,
-        # one-shot CLI invocation, but this file calls we.main()
-        # repeatedly, in-process, across many tests. Save/restore here
-        # so that leak doesn't outlive this test class and silently
-        # change unrelated tests' behavior elsewhere in the suite.
-        self._orig_ignored_tag_patterns = list(ex.ignored_tag_patterns)
 
     def tearDown(self):
         sys.argv = self._orig_argv
         sys.stdout = self._orig_stdout
-        ex.ignored_tag_patterns = self._orig_ignored_tag_patterns
         for path in (self.input_plain, self.templates_plain,
                      self.input_bz2, self.templates_bz2):
             if os.path.exists(path):

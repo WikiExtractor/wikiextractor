@@ -70,8 +70,8 @@ from io import StringIO
 from multiprocessing import Queue, get_context, cpu_count, Value, Condition
 from timeit import default_timer
 
-from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces, \
-    resolve_template_page
+from .extract import Extractor, ignoreTag, define_template, \
+    resolve_template_page, _DEFAULT_IGNORED_TAG_PATTERNS
 from . import template_blob
 
 # ===========================================================================
@@ -112,11 +112,6 @@ def configure_mapreduce_logging(enabled):
             '%(levelname)s: %(asctime)s %(message)s'))
         mapreduce_logger.addHandler(handler)
     mapreduce_logger.propagate = False
-
-##
-# Defined in <siteinfo>
-# We include as default Template, when loading external template file.
-knownNamespaces = set(['Template'])
 
 ##
 # The namespace used for template definitions
@@ -222,7 +217,7 @@ tagRE = re.compile(r'(.*?)<(/?\w+)[^>]*>(?:([^<]*)(<.*?>)?)?')
 
 
 def load_templates(file, output_file=None, encoding='utf-8', templates=None, redirects=None,
-                    blob_builder=None, redirects_blob_builder=None):
+                    blob_builder=None, redirects_blob_builder=None, template_prefix=''):
     """
     Load templates from :param file:.
     :param output_file: file where to save templates and modules.
@@ -251,7 +246,22 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, red
         expansion) and so is exposed to the identical fork/COW
         privatization growth confirmed for templates itself -- see
         template_blob.py's own module docstring.
-    :return: number of templates loaded.
+    :param template_prefix: the already-known Template-namespace
+        prefix (e.g. 'Template:'), if the caller already determined
+        it from the real dump's own siteinfo -- process_dump()'s own,
+        separate siteinfo scan does this before ever calling here.
+        When not given (empty), falls back to self-bootstrapping it
+        from the first colon-containing title encountered, same as
+        previously, just via a local variable instead of the (now
+        removed) Extractor.templatePrefix class attribute -- this
+        function never constructs any Extractor itself, it only needs
+        the prefix for its own page-filtering logic during loading.
+    :return: (number of templates loaded, the template_prefix that was
+        actually used -- either what was passed in, or whatever got
+        self-bootstrapped). The caller threads this into each real
+        Extractor(...) it constructs -- particularly the --article
+        path, which has no separate siteinfo scan of its own and
+        relies entirely on this return value.
     """
     global templateNamespace
     global moduleNamespace, modulePrefix
@@ -280,12 +290,12 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, red
             page = []
         elif tag == 'title':
             title = m.group(3)
-            if not output_file and not templateNamespace:  # do not know it yet
+            if not output_file and not template_prefix:  # do not know it yet
                 # we reconstruct it from the first title
                 colon = title.find(':')
                 if colon > 1:
                     templateNamespace = title[:colon]
-                    Extractor.templatePrefix = title[:colon + 1]
+                    template_prefix = title[:colon + 1]
             # FIXME: should reconstruct also moduleNamespace
         elif tag == 'text':
             tag_end = line.index('>', m.start(2))
@@ -309,7 +319,7 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, red
         elif inText:
             page.append(line)
         elif tag == '/page':
-            if title.startswith(Extractor.templatePrefix):
+            if title.startswith(template_prefix):
                 if blob_builder is not None or redirects_blob_builder is not None:
                     result = resolve_template_page(title, page)
                     if result is not None:
@@ -322,7 +332,7 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, red
                     define_template(title, page, templates, redirects)
                 template_count += 1
             # save templates and modules to file
-            if output_file and (title.startswith(Extractor.templatePrefix) or
+            if output_file and (title.startswith(template_prefix) or
                                 title.startswith(modulePrefix)):
                 output.write('<page>\n')
                 output.write('   <title>%s</title>\n' % title)
@@ -339,7 +349,7 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, red
     if output_file:
         output.close()
         logging.info("Saved %d templates to '%s'", template_count, output_file)
-    return template_count
+    return template_count, template_prefix
 
 
 def decode_open(filename, mode='rt', encoding='utf-8'):
@@ -500,15 +510,19 @@ def watchdog(jobs_queue, output_queue, reduce_proc, workers, stop_event, interva
             "%.1f" % sum(worker_mems) if worker_mems else "unknown")
 
 
-def load_and_compact_templates(template_file, input_file, input):
+def load_and_compact_templates(template_file, input_file, input, template_prefix=''):
     """Loads templates and redirects (from template_file if given,
     else input_file itself) and compacts each into its own
     shared-memory-backed view.
 
-    Returns (template_blob_ctx, redirects_blob_ctx, input) -- input is
-    returned because, when template_file isn't given, this scans and
-    then re-opens input_file itself, and the caller needs that updated
-    handle.
+    Returns (template_blob_ctx, redirects_blob_ctx, input, template_prefix)
+    -- input is returned because, when template_file isn't given, this
+    scans and then re-opens input_file itself, and the caller needs
+    that updated handle; template_prefix is returned because, when the
+    caller doesn't already know it (passes '' -- the --article path,
+    which has no separate siteinfo scan of its own), this discovers it
+    via load_templates()'s own self-bootstrap and the caller needs the
+    result to construct real Extractor instances correctly.
 
     Streams parsed templates and redirects directly into their own
     template_blob.StreamingTemplateBlobBuilder rather than building
@@ -544,16 +558,18 @@ def load_and_compact_templates(template_file, input_file, input):
     if template_file and os.path.exists(template_file):
         logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
         file = decode_open(template_file)
-        template_count = load_templates(file, blob_builder=builder,
-                                         redirects_blob_builder=redirects_builder)
+        template_count, template_prefix = load_templates(
+            file, blob_builder=builder, redirects_blob_builder=redirects_builder,
+            template_prefix=template_prefix)
         file.close()
     else:
         if input_file == '-':
             # can't scan then reset stdin; must error w/ suggestion to specify template_file
             raise ValueError("to use templates with stdin dump, must supply explicit template-file")
         logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
-        template_count = load_templates(input, template_file, blob_builder=builder,
-                                         redirects_blob_builder=redirects_builder)
+        template_count, template_prefix = load_templates(
+            input, template_file, blob_builder=builder, redirects_blob_builder=redirects_builder,
+            template_prefix=template_prefix)
         input.close()
         input = decode_open(input_file)
     logging.info("Loaded %d templates in %.1fs", template_count, default_timer() - template_load_start)
@@ -571,11 +587,12 @@ def load_and_compact_templates(template_file, input_file, input):
     redirects_blob_ctx = template_blob.compact_blobs(*redirects_builder.finish())
     logging.info("Compacted templates and redirects into shared memory in %.1fs",
                  default_timer() - compact_start)
-    return template_blob_ctx, redirects_blob_ctx, input
+    return template_blob_ctx, redirects_blob_ctx, input, template_prefix
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe, expand_templates=True, debug_map_reduce=False):
+                 process_count, html_safe, expand_templates=True, debug_map_reduce=False,
+                 extractor_kwargs=None):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -588,12 +605,25 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     :param debug_map_reduce: enables mapreduce_logger's DEBUG-level
         messages (see configure_mapreduce_logging()) -- per-page
         timing, queue dispatch, reducer progress, watchdog status.
+    :param extractor_kwargs: the CLI-derived subset of Extractor's own
+        constructor arguments (keepLinks, HtmlFormatting, to_json,
+        to_text, discard_empty, ignored_tag_patterns, and optionally
+        acceptedNamespaces), built once by main()'s
+        build_extractor_kwargs(). This function adds templatePrefix
+        and knownNamespaces to a copy of it, once real siteinfo has
+        been scanned below, and passes the complete result through to
+        every worker and every Extractor(...) constructed anywhere in
+        this run -- no piece of it is a shared global read implicitly
+        by anything.
     """
-    global knownNamespaces
+    extractor_kwargs = dict(extractor_kwargs) if extractor_kwargs else {}
+
     global templateNamespace
     global moduleNamespace, modulePrefix
 
     urlbase = ''                # This is obtained from <siteinfo>
+    known_namespaces = set(['Template'])
+    template_prefix = ''
 
     input = decode_open(input_file)
 
@@ -610,19 +640,23 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
             base = m.group(3)
             urlbase = base[:base.rfind("/")]
         elif tag == 'namespace':
-            knownNamespaces.add(m.group(3))
+            known_namespaces.add(m.group(3))
             if re.search('key="10"', line):
                 templateNamespace = m.group(3)
-                Extractor.templatePrefix = templateNamespace + ':'
+                template_prefix = templateNamespace + ':'
             elif re.search('key="828"', line):
                 moduleNamespace = m.group(3)
                 modulePrefix = moduleNamespace + ':'
         elif tag == '/siteinfo':
             break
 
+    extractor_kwargs['templatePrefix'] = template_prefix
+    extractor_kwargs['knownNamespaces'] = known_namespaces
+
     if expand_templates:
-        template_blob_ctx, redirects_blob_ctx, input = load_and_compact_templates(
-            template_file, input_file, input)
+        template_blob_ctx, redirects_blob_ctx, input, template_prefix = load_and_compact_templates(
+            template_file, input_file, input, template_prefix=template_prefix)
+        extractor_kwargs['templatePrefix'] = template_prefix
     else:
         # nullcontext, not None -- keeps the with-statement below
         # uniform regardless of whether templates are in play at all,
@@ -686,7 +720,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         for _ in range(max(1, process_count)):
             extractor = Process(target=extract_process,
                                 args=(jobs_queue, output_queue, html_safe, debug_map_reduce,
-                                      template_blob_names, redirects_blob_names))
+                                      template_blob_names, redirects_blob_names, extractor_kwargs))
             extractor.daemon = True  # only live while parent process lives
             extractor.start()
             workers.append(extractor)
@@ -755,7 +789,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
 
 def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
-                     template_blob_names=None, redirects_blob_names=None):
+                     template_blob_names=None, redirects_blob_names=None, extractor_kwargs=None):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
@@ -792,7 +826,17 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
         spawn instead of fork, which inherits nothing implicitly at
         all -- doing it this way now means extract_process()'s own
         body doesn't need to change shape later for that transition.
+    :param extractor_kwargs: the rest of Extractor's own constructor
+        arguments (templatePrefix, knownNamespaces, acceptedNamespaces,
+        ignored_tag_patterns, keepLinks, keepSections, HtmlFormatting,
+        to_json, to_text, discard_empty), built once by process_dump()
+        and passed through unchanged here -- same reasoning as
+        template_blob_names/redirects_blob_names above: every one of
+        these used to be a module- or class-level global a worker
+        picked up implicitly (several genuinely broken that way -- see
+        Extractor's own docstring), now plain, explicit arguments.
     """
+    extractor_kwargs = extractor_kwargs or {}
     configure_mapreduce_logging(debug_map_reduce)
     worker_ctx = (template_blob.attach(template_blob_names) if template_blob_names is not None
                   else contextlib.nullcontext(None))
@@ -808,7 +852,7 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
                                        os.getpid(), ordinal, page_id, title)
                 out = StringIO()  # memory buffer
                 Extractor(*job[:-1], templates=worker_templates,
-                          redirects=worker_redirects).extract(out, html_safe)  # (id, urlbase, title, page)
+                          redirects=worker_redirects, **extractor_kwargs).extract(out, html_safe)  # (id, urlbase, title, page)
                 finish = time.time()
                 mapreduce_logger.debug(
                     "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r elapsed=%.2fs",
@@ -931,8 +975,6 @@ minFileSize = 200 * 1024
 
 
 def main():
-    global acceptedNamespaces
-
     parser = argparse.ArgumentParser(prog=os.path.basename(sys.argv[0]),
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      description=__doc__)
@@ -997,13 +1039,25 @@ def main():
 
     args = parser.parse_args()
 
-    Extractor.keepLinks = args.links
-    Extractor.HtmlFormatting = args.html
+    keepLinks = args.links
     if args.html:
-        Extractor.keepLinks = True
-    Extractor.to_json = args.json
-    Extractor.to_text = args.text
-    Extractor.discard_empty = args.discard_empty
+        keepLinks = True
+    extractor_kwargs = {
+        'keepLinks': keepLinks,
+        'HtmlFormatting': args.html,
+        'to_json': args.json,
+        'to_text': args.text,
+        'discard_empty': args.discard_empty,
+        # Default set plus 'a' when links aren't being kept -- built
+        # explicitly, once, per run, rather than the old approach of
+        # mutating extract.py's own module-level list at import time
+        # (ignoreTag() is a pure function now: it returns the compiled
+        # pattern instead of appending it anywhere).
+        'ignored_tag_patterns': (list(_DEFAULT_IGNORED_TAG_PATTERNS) +
+                                  ([] if keepLinks else [ignoreTag('a')])),
+    }
+    if args.namespaces:
+        extractor_kwargs['acceptedNamespaces'] = set(args.namespaces.split(','))
 
     try:
         power = 'kmg'.find(args.bytes[-1].lower()) + 1
@@ -1014,9 +1068,6 @@ def main():
     except ValueError:
         logging.error('Insufficient or invalid size: %s', args.bytes)
         return
-
-    if args.namespaces:
-        acceptedNamespaces = set(args.namespaces.split(','))
 
     FORMAT = '%(levelname)s: %(message)s'
     logging.basicConfig(format=FORMAT)
@@ -1036,22 +1087,24 @@ def main():
 
     input_file = args.input
 
-    if not Extractor.keepLinks:
-        ignoreTag('a')
-
     if args.article:
         def compact_article_templates(templates_path):
             """Streams directly into blob builders, same as
             load_and_compact_templates() -- matches real behavior more
-            closely, and --article exists partly to validate that."""
+            closely, and --article exists partly to validate that.
+            Returns (owner, owner, template_prefix) -- the discovered
+            prefix from load_templates()'s own self-bootstrap, since
+            this path has no separate siteinfo scan of its own."""
             builder = template_blob.StreamingTemplateBlobBuilder()
             redirects_builder = template_blob.StreamingTemplateBlobBuilder()
             with decode_open(templates_path) as file:
-                load_templates(file, blob_builder=builder,
-                                redirects_blob_builder=redirects_builder)
+                _count, prefix = load_templates(file, blob_builder=builder,
+                                                 redirects_blob_builder=redirects_builder)
             return (template_blob.compact_blobs(*builder.finish()),
-                    template_blob.compact_blobs(*redirects_builder.finish()))
+                    template_blob.compact_blobs(*redirects_builder.finish()),
+                    prefix)
 
+        article_extractor_kwargs = dict(extractor_kwargs)
         if args.templates and os.path.exists(args.templates):
             # Same compaction as process_dump() -- deliberately not a
             # separate plain-dict path for --article just because
@@ -1059,7 +1112,9 @@ def main():
             # exists partly to validate real behavior, and exercising
             # a different templates lookup mechanism here than what
             # real multiprocess runs use would defeat that.
-            article_templates_ctx, article_redirects_ctx = compact_article_templates(args.templates)
+            article_templates_ctx, article_redirects_ctx, template_prefix = \
+                compact_article_templates(args.templates)
+            article_extractor_kwargs['templatePrefix'] = template_prefix
         else:
             article_templates_ctx = contextlib.nullcontext((None, None))
             article_redirects_ctx = contextlib.nullcontext((None, None))
@@ -1071,7 +1126,8 @@ def main():
                 for id, revid, title, page in collect_pages(input):
                     Extractor(id, revid, urlbase, title, page,
                               templates=article_templates,
-                              redirects=article_redirects).extract(sys.stdout)
+                              redirects=article_redirects,
+                              **article_extractor_kwargs).extract(sys.stdout)
         return
 
     output_path = args.output
@@ -1085,7 +1141,7 @@ def main():
     configure_mapreduce_logging(args.debug_map_reduce)
     process_dump(input_file, args.templates, output_path, file_size,
                  args.compress, args.processes, args.html_safe, not args.no_templates,
-                 args.debug_map_reduce)
+                 args.debug_map_reduce, extractor_kwargs=extractor_kwargs)
 
 if __name__ == '__main__':
     main()

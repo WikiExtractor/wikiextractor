@@ -188,7 +188,8 @@ def collect_doc_ids(path, verbose_label):
     return ids
 
 
-def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None, templates=None, redirects=None):
+def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None, templates=None,
+                       redirects=None, template_prefix=''):
     """
     Stream through the original XML dump looking for <page> blocks whose
     page id is in target_ids. Returns {id: info_dict} where info_dict has
@@ -240,7 +241,8 @@ def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None, te
                 if '</page>' in line:
                     in_page = False
                     if page_id in remaining:
-                        results[page_id] = _parse_page_block(''.join(page_lines), ex_module, templates, redirects)
+                        results[page_id] = _parse_page_block(
+                            ''.join(page_lines), ex_module, templates, redirects, template_prefix)
                         remaining.discard(page_id)
                         pbar.set_postfix(found=f"{len(results)}/{total_targets}")
                     page_lines = []
@@ -250,7 +252,7 @@ def scan_dump_for_ids(dump_path, target_ids, early_exit=True, ex_module=None, te
     return results, remaining
 
 
-def _parse_page_block(block, ex_module=None, templates=None, redirects=None):
+def _parse_page_block(block, ex_module=None, templates=None, redirects=None, template_prefix=''):
     title_m = TITLE_RE.search(block)
     title = title_m.group(1) if title_m else ''
     has_redirect = bool(REDIRECT_TAG_RE.search(block))
@@ -290,7 +292,8 @@ def _parse_page_block(block, ex_module=None, templates=None, redirects=None):
         try:
             extractor = ex_module.Extractor(
                 page_id, page_id, f"https://example.org/wiki?curid={page_id}",
-                title, [stripped], templates=templates, redirects=redirects)
+                title, [stripped], templates=templates, redirects=redirects,
+                templatePrefix=template_prefix)
             # Run on the full page text, redirect line included, to
             # exactly mirror what the real extraction pipeline does in
             # Extractor.extract() -- not just the trailing portion in
@@ -363,6 +366,7 @@ def main():
     ex_module = None
     templates = None
     redirects = None
+    template_prefix = ''
     if not args.no_extraction_check:
         try:
             import wikiextractor.extract as ex_module
@@ -372,7 +376,7 @@ def main():
                 templates = {}
                 redirects = {}
                 with we.decode_open(args.templates) as f:
-                    count = we.load_templates(f, templates=templates, redirects=redirects)
+                    count, template_prefix = we.load_templates(f, templates=templates, redirects=redirects)
                 print(f"Loaded {count} templates.", file=sys.stderr)
         except ImportError as e:
             print(f"warning: --no-extraction-check was not given, but wikiextractor isn't "
@@ -396,7 +400,7 @@ def main():
     dump_info, not_found = scan_dump_for_ids(args.dump, missing,
                                               early_exit=not args.no_early_exit,
                                               ex_module=ex_module, templates=templates,
-                                              redirects=redirects)
+                                              redirects=redirects, template_prefix=template_prefix)
 
     rows = []
     counts = {}

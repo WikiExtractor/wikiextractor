@@ -168,11 +168,11 @@ class RecursiveNestingEndToEndTests(unittest.TestCase):
         self.redirects = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.Extractor.templatePrefix = "Template:"
+        self.templatePrefix = "Template:"
 
     def get_result(self, article_text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [article_text], templates=self.templates, redirects=self.redirects)
+                               "Test Article", [article_text], templates=self.templates, redirects=self.redirects, templatePrefix=self.templatePrefix)
         return extractor.clean_text(article_text, expand_templates=True)
 
     def test_six_brace_indirection_the_real_documented_example(self):
@@ -227,11 +227,11 @@ class RecursiveNestingWeirdCountsEndToEndTests(unittest.TestCase):
         self.redirects = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.Extractor.templatePrefix = "Template:"
+        self.templatePrefix = "Template:"
 
     def get_result(self, article_text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [article_text], templates=self.templates, redirects=self.redirects)
+                               "Test Article", [article_text], templates=self.templates, redirects=self.redirects, templatePrefix=self.templatePrefix)
         return extractor.clean_text(article_text, expand_templates=True)
 
     def test_seven_braces_stray_literal_brace_survives_around_resolved_value(self):
@@ -264,11 +264,11 @@ class DynamicTemplateNameEndToEndTests(unittest.TestCase):
         self.redirects = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.Extractor.templatePrefix = "Template:"
+        self.templatePrefix = "Template:"
 
     def get_result(self, article_text):
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [article_text], templates=self.templates, redirects=self.redirects)
+                               "Test Article", [article_text], templates=self.templates, redirects=self.redirects, templatePrefix=self.templatePrefix)
         return extractor.clean_text(article_text, expand_templates=True)
 
     def test_dynamic_template_name_call_resolves_correctly(self):

@@ -1,6 +1,11 @@
 """
 Tests for collect_pages()'s page-filtering condition, which had a
-Python operator-precedence bug: 'and' binds tighter than 'or', so
+Python operator-precedence bug. The condition at the time (since
+superseded by the #254 fix -- see test_colon_in_title.py -- which
+replaced the acceptedNamespaces-based check below with a direct read
+of the page's own <ns> element; quoted here only as historical context
+for the precedence bug itself, not a description of the current code):
+'and' binds tighter than 'or', so
 
     if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
             not redirect and not title.startswith(templateNamespace)):
@@ -29,7 +34,11 @@ Fixed by parenthesizing the two logical halves explicitly:
             not redirect and not title.startswith(templateNamespace)):
 
 so the namespace check and the redirect/duplicate/template checks are
-both always evaluated, exactly as originally intended.
+both always evaluated, exactly as originally intended. (The
+acceptedNamespaces half was itself removed entirely by the later #254
+fix -- collect_pages() now reads <ns> directly instead -- but the
+redirect/duplicate/template-exclusion logic these tests actually cover
+is unchanged by that.)
 
 Run with:
     python -m unittest tests.test_collect_pages_redirect -v
@@ -49,20 +58,17 @@ import wikiextractor.WikiExtractor as we
 class CollectPagesRedirectFilterTests(unittest.TestCase):
 
     def setUp(self):
-        # collect_pages() relies on these module-level globals, normally
-        # populated from the dump's own <siteinfo> section -- set them
+        # collect_pages() relies on this module-level global, normally
+        # populated from the dump's own <siteinfo> section -- set it
         # explicitly here, matching what a real dump would provide,
         # rather than relying on whatever a prior test left behind.
         self._orig_namespace = we.templateNamespace
-        self._orig_accepted = we.acceptedNamespaces
         we.templateNamespace = 'Template'
-        we.acceptedNamespaces = set(['w'])
         self.tmpdir = os.path.dirname(os.path.abspath(__file__))
         self._paths = []
 
     def tearDown(self):
         we.templateNamespace = self._orig_namespace
-        we.acceptedNamespaces = self._orig_accepted
         for path in self._paths:
             if os.path.exists(path):
                 os.remove(path)
@@ -113,7 +119,6 @@ class CollectPagesRedirectFilterTests(unittest.TestCase):
         # excluded -- the fix must not just be "fixing" the no-colon
         # case by accident while leaving the with-colon case broken
         # some other way.
-        we.acceptedNamespaces = set(['w', 'wiktionary'])
         xml = '''<mediawiki>
   <siteinfo><sitename>Test</sitename></siteinfo>
   <page>

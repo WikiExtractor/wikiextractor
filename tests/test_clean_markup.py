@@ -20,16 +20,6 @@ from wikiextractor.clean import clean_markup
 
 class CleanMarkupTests(unittest.TestCase):
 
-    def setUp(self):
-        ex.Extractor.templatePrefix = 'Template:'
-        # Reset to the real default set before every test, restore
-        # after -- don't depend on what state some other test file
-        # (e.g. test_article_mode.py) left in this shared list.
-        self._orig_ignored_tag_patterns = list(ex.ignored_tag_patterns)
-
-    def tearDown(self):
-        ex.ignored_tag_patterns = self._orig_ignored_tag_patterns
-
     def test_basic_prose_and_bold_markup(self):
         result = list(clean_markup("'''Geography''' is a broad field of study."))
         self.assertEqual(result, ['Geography is a broad field of study.'])

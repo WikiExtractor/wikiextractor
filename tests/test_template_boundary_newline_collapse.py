@@ -78,7 +78,7 @@ class NewlineCollapseTestCase(unittest.TestCase):
         self.redirects = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.Extractor.templatePrefix = "Template:"
+        self.templatePrefix = "Template:"
 
     def stored_body(self, page_lines):
         ex.define_template('Template:X', page_lines, self.templates, self.redirects)
@@ -112,7 +112,8 @@ class NoincludeTrailingNewlineTests(NewlineCollapseTestCase):
         ], self.templates, self.redirects)
         wikitext = 'cite: [{{LinkB|2|119}} Some Label]'
         extractor = Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                               "Test Article", [wikitext], templates=self.templates, redirects=self.redirects)
+                               "Test Article", [wikitext], templates=self.templates,
+                               redirects=self.redirects, templatePrefix=self.templatePrefix)
         result = extractor.clean_text(wikitext, expand_templates=True)
         self.assertEqual(result, ['cite: Some Label'])
 

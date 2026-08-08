@@ -208,7 +208,8 @@ class RecordingDict(dict):
         return super().get(key, default)
 
 
-def find_redirect_templates_invoked(ex, page_id, wikitext, non_english_redirect_titles, templates, redirects):
+def find_redirect_templates_invoked(ex, page_id, wikitext, non_english_redirect_titles, templates,
+                                     redirects, template_prefix=''):
     """
     Runs the real clean_text() on wikitext, instrumented to record
     every template title looked up, then returns the subset of those
@@ -222,13 +223,18 @@ def find_redirect_templates_invoked(ex, page_id, wikitext, non_english_redirect_
     `templates`/`redirects` in extract.py to save/swap/restore around
     this call at all; the caller's own dicts are untouched by the
     wrapping itself).
+    template_prefix: the Template-namespace prefix (e.g. 'Template:'),
+        as discovered by load_templates() in main() -- without this,
+        a bare {{TemplateName}} call resolves to just 'TemplateName'
+        with no prefix at all, which never matches the real, stored
+        'Template:TemplateName' key, and every lookup silently misses.
     """
     looked_up = set()
     wrapped_templates = RecordingDict(templates, looked_up.add)
     wrapped_redirects = RecordingDict(redirects, looked_up.add)
     extractor = ex.Extractor(page_id, page_id, f"https://example.org/wiki?curid={page_id}",
                               f"Page{page_id}", [wikitext], templates=wrapped_templates,
-                              redirects=wrapped_redirects)
+                              redirects=wrapped_redirects, templatePrefix=template_prefix)
     try:
         extractor.clean_text(wikitext, expand_templates=True)
     except Exception:
@@ -350,7 +356,7 @@ def main():
     redirects = {}
     with open(args.templates, encoding='utf-8', errors='replace') as f:
         import wikiextractor.WikiExtractor as we
-        we.load_templates(f, templates=templates, redirects=redirects)
+        _count, template_prefix = we.load_templates(f, templates=templates, redirects=redirects)
 
     source_texts = get_source_wikitext_by_id(args.dump, changed_ids)
     missing_from_source = [doc_id for doc_id in changed_ids if doc_id not in source_texts]
@@ -379,7 +385,8 @@ def main():
 
         if doc_id in source_texts:
             invoked = find_redirect_templates_invoked(
-                ex, doc_id, source_texts[doc_id], non_english_redirect_titles, templates, redirects)
+                ex, doc_id, source_texts[doc_id], non_english_redirect_titles, templates, redirects,
+                template_prefix=template_prefix)
         else:
             invoked = None
 

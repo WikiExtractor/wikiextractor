@@ -73,7 +73,7 @@ class LoadTemplatesOutputFileWhitespaceTests(unittest.TestCase):
 
     def setUp(self):
         we.templateNamespace = ''
-        ex.Extractor.templatePrefix = ''
+        self.templatePrefix = ''
         self._tmpdir = tempfile.mkdtemp()
         self.addCleanup(self._cleanup_tmpdir)
 
@@ -98,12 +98,12 @@ class LoadTemplatesOutputFileWhitespaceTests(unittest.TestCase):
                 tag = m.group(2)
                 if tag == 'namespace' and 'key="10"' in line:
                     we.templateNamespace = m.group(3)
-                    ex.Extractor.templatePrefix = we.templateNamespace + ':'
+                    self.templatePrefix = we.templateNamespace + ':'
                 elif tag == '/siteinfo':
                     break
 
         with we.decode_open(dump_path) as f:
-            we.load_templates(f, output_file=output_path)
+            we.load_templates(f, output_file=output_path, template_prefix=self.templatePrefix)
 
         with open(output_path, encoding='utf-8') as f:
             return f.read()
@@ -139,7 +139,7 @@ class LoadTemplatesOutputFileWhitespaceTests(unittest.TestCase):
             f.write(output)
 
         we.templateNamespace = ''
-        ex.Extractor.templatePrefix = ''
+        roundtrip_prefix = ''
         with we.decode_open(roundtrip_path) as f:
             for line in f:
                 m = we.tagRE.search(line)
@@ -148,16 +148,17 @@ class LoadTemplatesOutputFileWhitespaceTests(unittest.TestCase):
                 tag = m.group(2)
                 if tag == 'namespace' and 'key="10"' in line:
                     we.templateNamespace = m.group(3)
-                    ex.Extractor.templatePrefix = we.templateNamespace + ':'
+                    roundtrip_prefix = we.templateNamespace + ':'
                 elif tag == '/siteinfo':
                     break
         roundtrip_templates = {}
         with we.decode_open(roundtrip_path) as f:
-            we.load_templates(f, templates=roundtrip_templates)
+            _count, roundtrip_prefix = we.load_templates(
+                f, templates=roundtrip_templates, template_prefix=roundtrip_prefix)
 
         wikitext = '{{Wrapper|value}}'
         extractor = ex.Extractor(1, '1', 'https://x', 'Test', [wikitext],
-                                  templates=roundtrip_templates)
+                                  templates=roundtrip_templates, templatePrefix=roundtrip_prefix)
         result = extractor.clean_text(wikitext, expand_templates=True)
         self.assertEqual(result, ['wrapped[value]'])
 

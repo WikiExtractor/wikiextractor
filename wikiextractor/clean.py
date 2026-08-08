@@ -26,29 +26,28 @@ def clean_markup(markup, keep_links=False, ignore_headers=True):
     :param keep_links: keep literal HTML <a> tags in the output (escaped,
         not live) instead of stripping them. Does not affect [[wikilinks]]
         or [external links], which always reduce to their display text --
-        that's controlled separately, by Extractor.keepLinks.
+        that's controlled separately, by the Extractor's own keepLinks.
     :param ignore_headers: if set to True, the output list will not contain
     headers, only paragraphs.
 
     Returns a list of paragraphs (unicode strings).
     """
-    # Save/restore rather than calling resetIgnoredTags(): that clears
-    # extract.py's entire, shared ignored_tag_patterns list, not just
-    # the ignoreTag('a') call this function itself might make below.
-    saved_ignored_tag_patterns = list(_ex.ignored_tag_patterns)
-    try:
-        if not keep_links:
-            ignoreTag('a')
-        # id/revid/urlbase/title/page are placeholders: markup is
-        # passed directly to clean_text() below rather than via
-        # self.page, which only Extractor.extract() reads.
-        extractor = Extractor(0, '', '', '', [])
-        paragraphs = extractor.clean_text(markup,
-                                           mark_headers=True,
-                                           expand_templates=False,
-                                           html_safe=True)
-    finally:
-        _ex.ignored_tag_patterns = saved_ignored_tag_patterns
+    # Own list, passed straight into the constructor -- no shared,
+    # module-level list to save/restore around this call anymore.
+    # ignoreTag() is a pure function (returns the compiled pattern
+    # rather than appending it anywhere), and Extractor itself no
+    # longer has any class- or module-level state of this kind at all.
+    ignored_tag_patterns = list(_ex._DEFAULT_IGNORED_TAG_PATTERNS)
+    if not keep_links:
+        ignored_tag_patterns.append(ignoreTag('a'))
+    # id/revid/urlbase/title/page are placeholders: markup is
+    # passed directly to clean_text() below rather than via
+    # self.page, which only Extractor.extract() reads.
+    extractor = Extractor(0, '', '', '', [], ignored_tag_patterns=ignored_tag_patterns)
+    paragraphs = extractor.clean_text(markup,
+                                       mark_headers=True,
+                                       expand_templates=False,
+                                       html_safe=True)
     if ignore_headers:
         paragraphs = filter(lambda s: not s.startswith('## '), paragraphs)
     return paragraphs

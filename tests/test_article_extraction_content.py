@@ -143,7 +143,7 @@ class ArticleExtractionContentTestCase(unittest.TestCase):
 
     def setUp(self):
         we.templateNamespace = ''
-        ex.Extractor.templatePrefix = ''
+        self.templatePrefix = ''
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
         with io.StringIO(_ARTICLE_XML) as f:
@@ -154,7 +154,7 @@ class ArticleExtractionContentTestCase(unittest.TestCase):
                 tag = m.group(2)
                 if tag == 'namespace' and 'key="10"' in line:
                     we.templateNamespace = m.group(3)
-                    ex.Extractor.templatePrefix = we.templateNamespace + ':'
+                    self.templatePrefix = we.templateNamespace + ':'
                 elif tag == '/siteinfo':
                     break
 
@@ -163,14 +163,16 @@ class ArticleExtractionContentTestCase(unittest.TestCase):
         redirects = {}
         if with_templates:
             with io.StringIO(_ARTICLE_XML) as f:
-                we.load_templates(f, templates=templates, redirects=redirects)
+                we.load_templates(f, templates=templates, redirects=redirects,
+                                   template_prefix=self.templatePrefix)
 
         with io.StringIO(_ARTICLE_XML) as f:
             pages = list(we.collect_pages(f))
         [(page_id, revid, title, page)] = [p for p in pages if p[2] == 'Geography']
 
         extractor = Extractor(page_id, revid, 'https://test.wikipedia.org/wiki?curid=1',
-                               title, page, templates=templates, redirects=redirects)
+                               title, page, templates=templates, redirects=redirects,
+                               templatePrefix=self.templatePrefix)
         return extractor.clean_text(''.join(page), expand_templates=True)
 
 

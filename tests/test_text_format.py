@@ -35,30 +35,23 @@ import wikiextractor.extract as ex
 
 
 class TextFormatTestCase(unittest.TestCase):
-    """Base class that resets wikiextractor's module-level template state
-    and output-format flags before each test, so tests don't leak state
-    into one another.
+    """Base class that resets wikiextractor's module-level template
+    cache state before each test, so tests don't leak state into one
+    another.
     """
 
     def setUp(self):
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.Extractor.templatePrefix = "Template:"
-        # Reset all three output-format flags to their defaults; each
-        # test sets only the ones it needs.
-        ex.Extractor.to_json = False
-        ex.Extractor.to_text = False
-        ex.Extractor.discard_empty = False
+        self.templatePrefix = "Template:"
 
-    def make_extractor(self, article_text, article_id=1, title="Test Article"):
+    def make_extractor(self, article_text, article_id=1, title="Test Article", **flags):
         return Extractor(article_id, str(article_id),
                           f"https://test.wikipedia.org/wiki?curid={article_id}",
-                          title, [article_text])
+                          title, [article_text], templatePrefix=self.templatePrefix, **flags)
 
     def extract_output(self, article_text, **flags):
-        for name, value in flags.items():
-            setattr(ex.Extractor, name, value)
-        extractor = self.make_extractor(article_text)
+        extractor = self.make_extractor(article_text, **flags)
         out = StringIO()
         extractor.extract(out, html_safe=True)
         return out.getvalue()

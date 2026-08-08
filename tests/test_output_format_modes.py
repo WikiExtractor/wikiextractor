@@ -43,33 +43,20 @@ import wikiextractor.extract as ex
 
 
 class OutputFormatModeTestCase(unittest.TestCase):
-    """Extractor.to_json/to_text/discard_empty are CLASS attributes,
-    shared mutable state rather than per-instance -- captured and
-    restored here so one test's mode selection can never leak into
-    another.
-    """
 
     def setUp(self):
-        self._orig_to_json = getattr(ex.Extractor, 'to_json', False)
-        self._orig_to_text = getattr(ex.Extractor, 'to_text', False)
-        self._orig_discard_empty = getattr(ex.Extractor, 'discard_empty', False)
-        ex.Extractor.templatePrefix = 'Template:'
+        self.templatePrefix = 'Template:'
 
-    def tearDown(self):
-        ex.Extractor.to_json = self._orig_to_json
-        ex.Extractor.to_text = self._orig_to_text
-        ex.Extractor.discard_empty = self._orig_discard_empty
-
-    def make_extractor(self, body_text, page_id=1, revid='100', title='My Title'):
+    def make_extractor(self, body_text, page_id=1, revid='100', title='My Title',
+                        to_json=False, to_text=False, discard_empty=False):
         return ex.Extractor(page_id, revid, 'https://test.wikipedia.org/wiki',
-                             title, [body_text])
+                             title, [body_text], templatePrefix=self.templatePrefix,
+                             to_json=to_json, to_text=to_text, discard_empty=discard_empty)
 
     def run_extract(self, body_text, to_json=False, to_text=False,
                      discard_empty=False, **kwargs):
-        ex.Extractor.to_json = to_json
-        ex.Extractor.to_text = to_text
-        ex.Extractor.discard_empty = discard_empty
-        extractor = self.make_extractor(body_text, **kwargs)
+        extractor = self.make_extractor(body_text, to_json=to_json, to_text=to_text,
+                                         discard_empty=discard_empty, **kwargs)
         buf = io.StringIO()
         extractor.extract(buf)
         return buf.getvalue()

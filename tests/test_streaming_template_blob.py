@@ -91,7 +91,7 @@ class LoadTemplatesBlobBuilderPathTests(unittest.TestCase):
 
     def setUp(self):
         we.templateNamespace = ''
-        ex.Extractor.templatePrefix = ''
+        self.templatePrefix = ''
 
     def load(self, xml_text):
         builder = tb.StreamingTemplateBlobBuilder()
@@ -104,12 +104,13 @@ class LoadTemplatesBlobBuilderPathTests(unittest.TestCase):
                 tag = m.group(2)
                 if tag == 'namespace' and 'key="10"' in line:
                     we.templateNamespace = m.group(3)
-                    ex.Extractor.templatePrefix = we.templateNamespace + ':'
+                    self.templatePrefix = we.templateNamespace + ':'
                 elif tag == '/siteinfo':
                     break
         with io.StringIO(xml_text) as f:
-            count = we.load_templates(f, blob_builder=builder,
-                                       redirects_blob_builder=redirects_builder)
+            count, self.templatePrefix = we.load_templates(
+                f, blob_builder=builder, redirects_blob_builder=redirects_builder,
+                template_prefix=self.templatePrefix)
         return count, builder, redirects_builder
 
     def test_plain_template_streamed_correctly(self):

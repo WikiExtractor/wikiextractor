@@ -158,15 +158,15 @@ class UrduRedirectTests(RedirectKeywordsTestCase):
         # never set elsewhere in this file, since every other test
         # here checks define_template()'s own redirect detection
         # directly rather than going through full expansion. Without
-        # this, fullyQualifiedTemplateTitle() falls back to no prefix
-        # at all, every lookup below misses, and this test would pass
-        # trivially regardless of whether redirects=self.redirects is
-        # even correct -- confirmed directly: without both this line
-        # and redirects=self.redirects on the next one, "scope=col"
-        # leaks through exactly as this test exists to catch.
-        ex.Extractor.templatePrefix = 'سانچہ:'
+        # templatePrefix set correctly below, fullyQualifiedTemplateTitle()
+        # falls back to no prefix at all, every lookup misses, and this
+        # test would pass trivially regardless of whether redirects is
+        # even correct -- confirmed directly: without both templatePrefix
+        # and redirects passed correctly here, "scope=col" leaks through
+        # exactly as this test exists to catch.
         extractor = ex.Extractor('1', '1', 'https://x', 'Test', [wikitext],
-                                  templates=self.templates, redirects=self.redirects)
+                                  templates=self.templates, redirects=self.redirects,
+                                  templatePrefix='سانچہ:')
         result = extractor.clean_text(wikitext)
         joined = '\n'.join(result)
         self.assertNotIn('scope=col', joined)

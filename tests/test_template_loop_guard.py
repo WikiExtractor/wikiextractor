@@ -64,18 +64,13 @@ class TemplateLoopGuardTestCase(unittest.TestCase):
         # Normally set by load_templates() when scanning a real dump's
         # first Template-namespace page; tests define templates directly
         # via define_template(), so it must be set explicitly here.
-        ex.Extractor.templatePrefix = "Template:"
-        # Normally set by WikiExtractor.py's main() (Extractor.to_json =
-        # args.json) before any Extractor.extract() call; tests that call
-        # .extract() directly need it set too, or it raises AttributeError
-        # (note: the class also defines an unused `toJson` attribute --
-        # a pre-existing, unrelated naming mismatch in extract.py).
-        ex.Extractor.to_json = False
+        self.templatePrefix = "Template:"
 
     def make_extractor(self, article_text, article_id=1, title="Test Article"):
         return Extractor(article_id, str(article_id),
                           f"https://test.wikipedia.org/wiki?curid={article_id}",
-                          title, [article_text], templates=self.templates, redirects=self.redirects)
+                          title, [article_text], templates=self.templates, redirects=self.redirects,
+                          templatePrefix=self.templatePrefix)
 
 
 class LegitimateSelfRecursionTests(TemplateLoopGuardTestCase):

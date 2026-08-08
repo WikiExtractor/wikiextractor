@@ -161,7 +161,7 @@ class RecordingDict(dict):
 
 def discover_and_extract(wikiextractor_extract_module, page_texts, templates_path, max_passes):
     ex = wikiextractor_extract_module
-    ex.Extractor.templatePrefix = determine_template_prefix(templates_path)
+    template_prefix = determine_template_prefix(templates_path)
 
     looked_up = set()
     # Local, not a module attribute: extract.py no longer has
@@ -185,7 +185,7 @@ def discover_and_extract(wikiextractor_extract_module, page_texts, templates_pat
             extractor = ex.Extractor(page_id, str(page_id),
                                       f"https://example.org/wiki?curid={page_id}",
                                       f"Page{page_id}", [wikitext], templates=templates,
-                                      redirects=redirects)
+                                      redirects=redirects, templatePrefix=template_prefix)
             try:
                 extractor.clean_text(wikitext, expand_templates=True)
             except Exception:

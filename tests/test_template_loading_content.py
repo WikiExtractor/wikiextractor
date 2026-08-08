@@ -127,7 +127,7 @@ class TemplateLoadingContentTests(unittest.TestCase):
         # reads the result, none of them mutate it, so there's no
         # cross-test isolation risk in sharing this single load.
         we.templateNamespace = ''
-        ex.Extractor.templatePrefix = ''
+        cls.templatePrefix = ''
         with io.StringIO(_TEMPLATES_XML) as f:
             for line in f:
                 m = we.tagRE.search(line)
@@ -136,13 +136,15 @@ class TemplateLoadingContentTests(unittest.TestCase):
                 tag = m.group(2)
                 if tag == 'namespace' and 'key="10"' in line:
                     we.templateNamespace = m.group(3)
-                    ex.Extractor.templatePrefix = we.templateNamespace + ':'
+                    cls.templatePrefix = we.templateNamespace + ':'
                 elif tag == '/siteinfo':
                     break
         cls.templates = {}
         cls.redirects = {}
         with io.StringIO(_TEMPLATES_XML) as f:
-            cls.count = we.load_templates(f, templates=cls.templates, redirects=cls.redirects)
+            cls.count, cls.templatePrefix = we.load_templates(
+                f, templates=cls.templates, redirects=cls.redirects,
+                template_prefix=cls.templatePrefix)
 
     def test_reported_count_matches_every_page_including_the_redirect(self):
         # 6 <page> elements total: 5 real templates + 1 redirect --

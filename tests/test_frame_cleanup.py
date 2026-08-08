@@ -44,11 +44,11 @@ class FrameCleanupOnExceptionTestCase(unittest.TestCase):
         self.redirects = {}
         ex.TemplateArg._parse_template.cache_clear()
         ex.Extractor._parse_template.cache_clear()
-        ex.Extractor.templatePrefix = "Template:"
+        self.templatePrefix = "Template:"
 
     def get_extractor(self, article_text):
         return Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
-                          "Test Article", [article_text], templates=self.templates, redirects=self.redirects)
+                          "Test Article", [article_text], templates=self.templates, redirects=self.redirects, templatePrefix=self.templatePrefix)
 
 
 class FrameStaysCleanAfterExceptionTests(FrameCleanupOnExceptionTestCase):

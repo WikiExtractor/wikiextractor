@@ -210,11 +210,10 @@ class TemplateContaminationTests(unittest.TestCase):
         ex.Extractor._parse_template.cache_clear()
         # load() below relies on load_templates()'s self-bootstrap
         # namespace detection, which only ever fires once per process
-        # (while we.templateNamespace is still falsy) -- reset both
-        # here so this doesn't silently pick up a stale prefix left
-        # by some other, unrelated test file's own dump data.
+        # (while we.templateNamespace is still falsy) -- reset here so
+        # this doesn't silently pick up a stale namespace left by some
+        # other, unrelated test file's own dump data.
         we.templateNamespace = ''
-        ex.Extractor.templatePrefix = ''
 
     def load(self, xml_text):
         import io
