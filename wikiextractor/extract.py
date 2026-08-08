@@ -2398,6 +2398,38 @@ def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
         return _SHARP_EXPR_ERROR_SPAN
 
 
+def sharp_ifexpr(test, valueIfTrue='', valueIfFalse='', *args, page_title=None, page_id=None, extractor=None):
+    """
+    {{#ifexpr: EXPRESSION | VALUE_IF_TRUE | VALUE_IF_FALSE}}
+
+    Evaluates EXPRESSION via sharp_expr() itself -- not a separate
+    evaluator -- so this gets sharp_expr()'s own safe AST-only
+    evaluation, malformed-expression logging, and per-article dedup
+    (including cascade suppression) for free, rather than duplicating
+    any of it. Real MediaWiki semantics: a nonzero result selects
+    valueIfTrue, zero selects valueIfFalse; a malformed expression
+    (unlike #if/#ifeq, which never fail this way, since their own
+    condition is never itself evaluated as an expression) reports the
+    same as a bare, failing #expr would and returns that same error
+    indicator rather than silently guessing a branch.
+    """
+    result = sharp_expr(test, page_title=page_title, page_id=page_id, extractor=extractor)
+    if result == _SHARP_EXPR_ERROR_SPAN:
+        return result
+    try:
+        numeric_result = float(result)
+    except ValueError:
+        # Shouldn't happen -- sharp_expr() only ever returns the error
+        # span above or a str() of the int/float it computed -- but
+        # fail safe rather than raise, consistent with every other
+        # parser function here.
+        return _SHARP_EXPR_ERROR_SPAN
+    if numeric_result != 0:
+        return valueIfTrue.strip()
+    else:
+        return valueIfFalse.strip()
+
+
 def sharp_if(testValue, valueIfTrue, valueIfFalse=None, *args):
     # In theory, we should evaluate the first argument here,
     # but it was evaluated while evaluating part[0] in expandTemplate().
@@ -2526,18 +2558,18 @@ def sharp_invoke(module, function, frame):
 
 parserFunctions = {
 
-    # '#expr' is handled directly in callParserFunction(), same as
-    # '#invoke' below it, not dispatched through this dict -- it
-    # needs page_title/page_id threaded through for its own failure
-    # logging, which no other entry here needs.
+    # '#expr' and '#ifexpr' are handled directly in
+    # callParserFunction(), same as '#invoke' below them, not
+    # dispatched through this dict -- both need page_title/page_id/
+    # extractor threaded through for #expr's own failure logging
+    # (#ifexpr evaluates its condition via sharp_expr() itself, so it
+    # needs the same three), which no other entry here needs.
 
     '#if': sharp_if,
 
     '#ifeq': sharp_ifeq,
 
     '#iferror': sharp_iferror,
-
-    '#ifexpr': lambda *args: '',  # not supported
 
     '#ifexist': lambda *args: '',  # not supported
 
@@ -2583,14 +2615,14 @@ def callParserFunction(functionName, args, frame, page_title=None, page_id=None,
         reached here may live inside a transcluded template, but the
         article is what a real investigation would start from anyway,
         and it's what's actually available here). Threaded through to
-        #expr specifically, which logs them on failure to make a
-        malformed on-wiki call findable; no other parser function
-        currently needs them.
+        #expr and #ifexpr specifically, which log them on failure to
+        make a malformed on-wiki call findable; no other parser
+        function currently needs them.
     :param extractor: the calling Extractor, threaded through to
-        #expr specifically for its own per-article malformed-#expr
-        counting/dedup (see sharp_expr()'s own docstring) -- same
-        reasoning as page_title/page_id above, no other parser
-        function currently needs it.
+        #expr and #ifexpr specifically for their own per-article
+        malformed-#expr counting/dedup (see sharp_expr()'s own
+        docstring) -- same reasoning as page_title/page_id above, no
+        other parser function currently needs it.
     :return: the result of the invocation, None in case of failure.
 
     http://meta.wikimedia.org/wiki/Help:ParserFunctions
@@ -2604,6 +2636,8 @@ def callParserFunction(functionName, args, frame, page_title=None, page_id=None,
             return ret
         if functionName == '#expr':
             return sharp_expr(*args, page_title=page_title, page_id=page_id, extractor=extractor)
+        if functionName == '#ifexpr':
+            return sharp_ifexpr(*args, page_title=page_title, page_id=page_id, extractor=extractor)
         if functionName in parserFunctions:
             ret = parserFunctions[functionName](*args)
             # logger.debug('parserFunction> %s(%s) %s', functionName, args, ret)

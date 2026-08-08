@@ -379,5 +379,66 @@ class SharpExprCascadeSuppressionTests(unittest.TestCase):
         self.assertEqual(extractor.malformed_expr_errs, 3)
 
 
+class SharpIfexprTests(unittest.TestCase):
+    """{{#ifexpr: EXPR | THEN | ELSE}} -- deliberately implemented as a
+    thin wrapper around sharp_expr() itself, reusing its safe AST-only
+    evaluation, malformed-expression logging, and per-article dedup
+    entirely rather than duplicating any of it. Not related to Lua/
+    Scribunto (#invoke) at all -- #ifexpr is a plain ParserFunctions
+    branch on a numeric expression, same family as #if/#ifeq/#switch.
+    """
+
+    def test_nonzero_selects_true_branch(self):
+        self.assertEqual(ex.sharp_ifexpr("5 > 3", "yes", "no"), "yes")
+
+    def test_zero_selects_false_branch(self):
+        self.assertEqual(ex.sharp_ifexpr("5 - 5", "yes", "no"), "no")
+
+    def test_false_comparison_selects_false_branch(self):
+        self.assertEqual(ex.sharp_ifexpr("5 > 30", "yes", "no"), "no")
+
+    def test_branches_are_stripped_like_if_and_ifeq_already_are(self):
+        self.assertEqual(ex.sharp_ifexpr("1", "  yes  ", "no"), "yes")
+
+    def test_missing_branches_default_to_empty(self):
+        self.assertEqual(ex.sharp_ifexpr("1"), "")
+        self.assertEqual(ex.sharp_ifexpr("0"), "")
+
+    def test_malformed_expression_reports_and_returns_error_span_not_a_guessed_branch(self):
+        # Real MediaWiki #ifexpr semantics on a malformed condition:
+        # an error indicator, not a silently-chosen branch -- #if and
+        # #ifeq never fail this way at all, since their own condition
+        # is a plain string comparison, never itself evaluated as an
+        # expression.
+        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+            result = ex.sharp_ifexpr("commodity", "yes", "no")
+        self.assertEqual(result, ex._SHARP_EXPR_ERROR_SPAN)
+        self.assertIn('Malformed #expr', logs.output[0])
+
+    def test_malformed_condition_shares_the_same_per_article_dedup_as_expr(self):
+        extractor = ex.Extractor(1, "1", "https://x", "Test Article", [])
+        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+            for _ in range(3):
+                ex.sharp_ifexpr("commodity", "yes", "no", page_title="Test Article",
+                                page_id="1", extractor=extractor)
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(extractor.malformed_expr_errs, 3)
+
+    def test_real_end_to_end_pipeline_computes_a_real_result_instead_of_nothing(self):
+        # Not #ifexpr in isolation -- confirms the real chain
+        # (clean_text() -> expandTemplate() -> callParserFunction() ->
+        # sharp_ifexpr() -> sharp_expr()) actually threads through
+        # correctly end to end, matching the real on-wiki template
+        # shape (a #switch{{#expr: X mod Y}} pattern) that motivated
+        # this feature.
+        templates = {
+            'Template:NextDay': '{{#ifexpr: {{{day}}} mod 2 = 0 | even day | odd day }}',
+        }
+        extractor = ex.Extractor(1, "1", "https://x", "Test Article", [], templates=templates,
+                                  templatePrefix='Template:')
+        result = extractor.clean_text('{{NextDay|day=4}}', expand_templates=True)
+        self.assertIn('even day', '\n'.join(result))
+
+
 if __name__ == '__main__':
     unittest.main()
