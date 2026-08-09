@@ -27,6 +27,7 @@ import warnings
 from functools import lru_cache
 from itertools import zip_longest
 from urllib.parse import quote as urlencode
+from urllib.parse import unquote as urldecode
 from html.entities import name2codepoint
 import logging
 import time
@@ -2709,6 +2710,8 @@ parserFunctions = {
     # This function is used in some pages to construct links
     # http://meta.wikimedia.org/wiki/Help:URL
     'urlencode': lambda string, *rest: urlencode(string),
+
+    'urldecode': lambda string, *rest: urldecode(string),
 
     'lc': lambda string, *rest: string.lower() if string else '',
 
