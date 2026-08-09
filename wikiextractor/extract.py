@@ -2636,6 +2636,145 @@ def sharp_padright(string, width, padding='0', *args):
     return _sharp_pad(string, width, padding, from_left=False)
 
 
+def sharp_len(string='', *args):
+    """{{#len: STRING }} -- character count. String functions
+    extension, hence the '#' prefix (unlike lc/uc/padleft/padright
+    above, which are core magic words without one)."""
+    return str(len(string))
+
+
+def sharp_pos(string='', target='', offset='0', *args):
+    """{{#pos: STRING | TARGET | OFFSET }} -- zero-based index of the
+    first occurrence of TARGET in STRING, searching from OFFSET
+    (default 0). Real MediaWiki semantics: returns an EMPTY STRING,
+    not -1, when TARGET isn't found -- Python's str.find() returns
+    -1, so that gets converted here rather than passed through
+    directly. Deliberately asymmetric with #rpos below, which returns
+    -1 on no match -- that's a real, documented quirk of the actual
+    String functions extension, not something to "fix" into
+    consistency here.
+    """
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        offset = 0
+    result = string.find(target, offset)
+    return '' if result == -1 else str(result)
+
+
+def sharp_rpos(string='', target='', *args):
+    """{{#rpos: STRING | TARGET }} -- zero-based index of the LAST
+    occurrence of TARGET in STRING. Real MediaWiki semantics: returns
+    -1 (as a string) when TARGET isn't found -- unlike #pos above,
+    which returns empty string on no match. This asymmetry is real
+    and documented, not a bug to reconcile between the two."""
+    return str(string.rfind(target))
+
+
+def sharp_sub(string='', start='0', length=None, *args):
+    """{{#sub: STRING | START | LENGTH }} -- substring, matching
+    PHP's substr() semantics (what real MediaWiki's #sub is built on)
+    precisely rather than approximating with a plain Python slice:
+      - START >= 0: begins at that position (0-indexed).
+      - START < 0: begins that many characters from the end.
+      - LENGTH omitted: returns everything from START to the end.
+      - LENGTH >= 0: returns up to LENGTH characters.
+      - LENGTH < 0: stops that many characters before the end of the
+        *whole string* -- not relative to START. This is the part a
+        naive s[start:start+length]-style translation gets wrong:
+        substr("Hello world", 6, -2) is "wor" (stop 2 short of the
+        whole string's own end), not an empty/nonsensical result from
+        computing 6 + -2 = 4 (before start) and slicing s[6:4].
+    """
+    n = len(string)
+    try:
+        start = int(start)
+    except (TypeError, ValueError):
+        start = 0
+    if start < 0:
+        start = max(n + start, 0)
+    else:
+        start = min(start, n)
+    if length is None or length == '':
+        end = n
+    else:
+        try:
+            length = int(length)
+        except (TypeError, ValueError):
+            length = 0
+        if length >= 0:
+            end = min(start + length, n)
+        else:
+            end = max(n + length, start)
+    return string[start:end]
+
+
+def sharp_count(string='', substring='', *args):
+    """{{#count: STRING | SUBSTRING }} -- non-overlapping occurrence
+    count, matching PHP's substr_count(). An empty SUBSTRING has no
+    sensible count (Python's own str.count('') counts a match between
+    every character, e.g. "abc".count('') == 4, which isn't a
+    meaningful answer here), so that case returns '0' rather than
+    passing through Python's own quirky definition.
+    """
+    if not substring:
+        return '0'
+    return str(string.count(substring))
+
+
+def sharp_replace(string='', search='', replace='', limit=None, *args):
+    """{{#replace: STRING | SEARCH | REPLACE | LIMIT }} -- replaces
+    up to LIMIT occurrences of SEARCH with REPLACE (default: all of
+    them). An empty SEARCH is left as a no-op returning STRING
+    unchanged, rather than Python's own str.replace('', x) behavior
+    of inserting x between every character -- PHP's str_replace()
+    (what real MediaWiki's #replace is built on) treats an empty
+    search as not matching anything, not as matching every gap.
+    """
+    if not search:
+        return string
+    if limit is None or limit == '':
+        return string.replace(search, replace)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return string.replace(search, replace)
+    return string.replace(search, replace, limit)
+
+
+def sharp_explode(string='', delimiter='', position='0', limit=None, *args):
+    """{{#explode: STRING | DELIMITER | POSITION | LIMIT }} -- splits
+    STRING on DELIMITER and returns the segment at zero-based
+    POSITION (real MediaWiki supports a negative POSITION too,
+    counting from the end -- matches Python's own negative list
+    indexing directly, so no special-casing needed for that part).
+    LIMIT caps the number of segments produced, with the LAST segment
+    absorbing everything beyond that count -- exactly Python's own
+    str.split(delimiter, maxsplit) semantics, so LIMIT translates to
+    maxsplit = LIMIT - 1. An empty DELIMITER has no valid split
+    semantics (real PHP explode() rejects it outright), so that
+    returns '' rather than raising or guessing a behavior. POSITION
+    outside the resulting segment count also returns ''.
+    """
+    if not delimiter:
+        return ''
+    try:
+        position = int(position)
+    except (TypeError, ValueError):
+        position = 0
+    if limit is None or limit == '':
+        parts = string.split(delimiter)
+    else:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = None
+        parts = string.split(delimiter, limit - 1) if limit and limit > 0 else string.split(delimiter)
+    if -len(parts) <= position < len(parts):
+        return parts[position]
+    return ''
+
+
 
 # Extension Scribuntu
 # Only minimal support for Lua modules invoked via #invoke.
@@ -2706,6 +2845,29 @@ parserFunctions = {
     '#timel': lambda *args: '',  # not supported
 
     '#titleparts': lambda *args: '',  # not supported
+
+    # String functions extension -- these are called as {{#len:...}},
+    # {{#pos:...}}, etc. in real wikitext, with a '#' prefix. The core
+    # case/url magic words further below (lc, uc, ucfirst, lcfirst,
+    # padleft, padright, urlencode, urldecode) are called without one
+    # -- {{lc:...}}, not {{#lc:...}} -- since they belong to a
+    # different, older part of MediaWiki's own syntax, not this
+    # extension. Both kinds are dispatched through this same dict
+    # either way; the '#' is just literally part of the string
+    # functions' own names as MediaWiki defines them.
+    '#len': sharp_len,
+
+    '#pos': sharp_pos,
+
+    '#rpos': sharp_rpos,
+
+    '#sub': sharp_sub,
+
+    '#count': sharp_count,
+
+    '#replace': sharp_replace,
+
+    '#explode': sharp_explode,
 
     # This function is used in some pages to construct links
     # http://meta.wikimedia.org/wiki/Help:URL
