@@ -58,16 +58,20 @@ class DetailLevelFilteringTests(unittest.TestCase):
         extractor = self.make_extractor()
         log_stream = StringIO()
         handler = logging.StreamHandler(log_stream)
-        root_logger = logging.getLogger()
-        original_level = root_logger.level
-        root_logger.addHandler(handler)
-        root_logger.setLevel(level)
+        # 'wikiextractor.extract' specifically, not the root logger --
+        # wikiextractor's own logging no longer touches the root
+        # logger at all (see configure_wikiextractor_logging() in
+        # WikiExtractor.py).
+        extract_logger = logging.getLogger('wikiextractor.extract')
+        original_level = extract_logger.level
+        extract_logger.addHandler(handler)
+        extract_logger.setLevel(level)
         try:
             out = StringIO()
             extractor.extract(out, html_safe=True)
         finally:
-            root_logger.removeHandler(handler)
-            root_logger.setLevel(original_level)
+            extract_logger.removeHandler(handler)
+            extract_logger.setLevel(original_level)
         return log_stream.getvalue()
 
     def test_not_shown_at_default_info_level(self):
@@ -93,15 +97,15 @@ class DetailLevelFilteringTests(unittest.TestCase):
                                   templates=templates, templatePrefix='Template:')
         log_stream = StringIO()
         handler = logging.StreamHandler(log_stream)
-        root_logger = logging.getLogger()
-        original_level = root_logger.level
-        root_logger.addHandler(handler)
-        root_logger.setLevel(ex.DETAIL)
+        extract_logger = logging.getLogger('wikiextractor.extract')
+        original_level = extract_logger.level
+        extract_logger.addHandler(handler)
+        extract_logger.setLevel(ex.DETAIL)
         try:
             extractor.clean_text('{{Simple}}', expand_templates=True)
         finally:
-            root_logger.removeHandler(handler)
-            root_logger.setLevel(original_level)
+            extract_logger.removeHandler(handler)
+            extract_logger.setLevel(original_level)
         log_output = log_stream.getvalue()
         self.assertNotIn("INVOCATION", log_output)
         self.assertNotIn("TITLE", log_output)

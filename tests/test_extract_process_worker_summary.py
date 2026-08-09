@@ -55,12 +55,21 @@ def run_extract_process(jobs, templates=None, redirects=None, template_prefix=''
     output_queue = queue.Queue()
     extractor_kwargs = {'templatePrefix': template_prefix} if template_prefix else {}
 
+    # extract_process() itself calls configure_wikiextractor_logging(),
+    # which sets wikiextractor_logger's own level (WARNING by default,
+    # matching what's wanted here) and gives it its own handler with
+    # propagate=False -- messages no longer reach the root logger at
+    # all, by design (see configure_wikiextractor_logging()'s own
+    # docstring), so capture directly from wikiextractor_logger
+    # instead. Attaching this handler first means
+    # configure_wikiextractor_logging()'s own "if not handlers" check
+    # won't add its default one on top of it.
     log_stream = StringIO()
     handler = logging.StreamHandler(log_stream)
-    root_logger = logging.getLogger()
-    original_level = root_logger.level
-    root_logger.addHandler(handler)
-    root_logger.setLevel(logging.WARNING)
+    wikiextractor_logger = logging.getLogger('wikiextractor')
+    original_level = wikiextractor_logger.level
+    original_propagate = wikiextractor_logger.propagate
+    wikiextractor_logger.addHandler(handler)
     try:
         we.extract_process(jobs_queue, output_queue, html_safe=True,
                             template_blob_names=None, redirects_blob_names=None,
@@ -68,8 +77,9 @@ def run_extract_process(jobs, templates=None, redirects=None, template_prefix=''
                                                'redirects': redirects} if templates is not None
                             else extractor_kwargs)
     finally:
-        root_logger.removeHandler(handler)
-        root_logger.setLevel(original_level)
+        wikiextractor_logger.removeHandler(handler)
+        wikiextractor_logger.setLevel(original_level)
+        wikiextractor_logger.propagate = original_propagate
 
     outputs = []
     while not output_queue.empty():

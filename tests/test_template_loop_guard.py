@@ -35,6 +35,7 @@ or, from the tests/ directory:
     python -m unittest test_template_loop_guard -v
 """
 
+import contextlib
 import logging
 import sys
 import time
@@ -71,6 +72,32 @@ class TemplateLoopGuardTestCase(unittest.TestCase):
                           f"https://test.wikipedia.org/wiki?curid={article_id}",
                           title, [article_text], templates=self.templates, redirects=self.redirects,
                           templatePrefix=self.templatePrefix)
+
+    @contextlib.contextmanager
+    def capture_extract_logger(self, level):
+        """Captures messages from extract.py's own 'wikiextractor.extract'
+        logger specifically -- not the root logger, which
+        wikiextractor's own logging no longer touches at all (see
+        configure_wikiextractor_logging() in WikiExtractor.py). Tests
+        here call Extractor methods directly rather than going through
+        extract_process(), so capturing from 'wikiextractor.extract'
+        itself is also more robust than relying on propagation through
+        'wikiextractor' -- whether that happens depends on whether
+        some other test in the same process has already called
+        configure_wikiextractor_logging(), which sets propagate=False
+        on it.
+        """
+        log_stream = StringIO()
+        handler = logging.StreamHandler(log_stream)
+        extract_logger = logging.getLogger('wikiextractor.extract')
+        original_level = extract_logger.level
+        extract_logger.addHandler(handler)
+        extract_logger.setLevel(level)
+        try:
+            yield log_stream
+        finally:
+            extract_logger.removeHandler(handler)
+            extract_logger.setLevel(original_level)
 
 
 class LegitimateSelfRecursionTests(TemplateLoopGuardTestCase):
@@ -200,17 +227,8 @@ class WarningLogDeduplicationTests(TemplateLoopGuardTestCase):
         article_text = "{{Redirect-multi|2|X|Y}}"
         extractor = self.make_extractor(article_text)
 
-        log_stream = StringIO()
-        handler = logging.StreamHandler(log_stream)
-        root_logger = logging.getLogger()
-        original_level = root_logger.level
-        root_logger.addHandler(handler)
-        root_logger.setLevel(logging.DEBUG)
-        try:
+        with self.capture_extract_logger(logging.DEBUG) as log_stream:
             extractor.clean_text(article_text, expand_templates=True)
-        finally:
-            root_logger.removeHandler(handler)
-            root_logger.setLevel(original_level)
 
         log_output = log_stream.getvalue()
         occurrences = log_output.count("Template loop detected")
@@ -232,25 +250,14 @@ class ErrorSummaryReportingTests(TemplateLoopGuardTestCase):
         article_text = "{{Self|x}}"
         extractor = self.make_extractor(article_text)
 
-        log_stream = StringIO()
-        handler = logging.StreamHandler(log_stream)
-        root_logger = logging.getLogger()
-        original_level = root_logger.level
-        root_logger.addHandler(handler)
-        # DEBUG, not WARNING: the per-article summary moved to DEBUG
-        # -- see extract()'s own comment for why (a common broken
-        # shared template can flag a large fraction of all articles on
-        # a real run, and one WARNING line per article at that scale
-        # drowns out everything else). extract_process() now logs a
-        # WARNING-level aggregate per worker instead; that's covered
-        # separately in test_extract_process_worker_summary.py.
-        root_logger.setLevel(logging.DEBUG)
-        try:
+        # DETAIL, not WARNING: the per-article summary lives at the
+        # DETAIL level (between INFO and DEBUG -- see extract.py's own
+        # DETAIL definition and comment for why). extract_process()
+        # separately logs a WARNING-level aggregate per worker; that's
+        # covered in test_extract_process_worker_summary.py.
+        with self.capture_extract_logger(ex.DETAIL) as log_stream:
             out = StringIO()
             extractor.extract(out, html_safe=True)
-        finally:
-            root_logger.removeHandler(handler)
-            root_logger.setLevel(original_level)
 
         log_output = log_stream.getvalue()
         self.assertIn("loop(", log_output,
@@ -261,18 +268,9 @@ class ErrorSummaryReportingTests(TemplateLoopGuardTestCase):
         article_text = "{{Plain}}"
         extractor = self.make_extractor(article_text)
 
-        log_stream = StringIO()
-        handler = logging.StreamHandler(log_stream)
-        root_logger = logging.getLogger()
-        original_level = root_logger.level
-        root_logger.addHandler(handler)
-        root_logger.setLevel(logging.WARNING)
-        try:
+        with self.capture_extract_logger(logging.WARNING) as log_stream:
             out = StringIO()
             extractor.extract(out, html_safe=True)
-        finally:
-            root_logger.removeHandler(handler)
-            root_logger.setLevel(original_level)
 
         self.assertEqual(log_stream.getvalue(), "",
                           "a clean article with no template errors should "

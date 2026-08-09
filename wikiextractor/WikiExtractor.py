@@ -80,21 +80,30 @@ from . import template_blob
 # Program version
 __version__ = '3.0.8'
 
-# Separate from extract.py's own 'wikiextractor.extract' logger (which
-# covers the extraction mechanics themselves -- template substitution,
-# link processing, etc., under --debug): this one covers map/reduce
-# coordination -- per-page timing, queue dispatch, reducer progress,
-# and worker/reducer liveness -- under --debug_map_reduce. Named and
-# configured independently so either can be enabled without the other.
+# This module's own logger -- everything logged directly from
+# WikiExtractor.py (CLI progress, per-worker error summaries) goes
+# through this, never the root logger, so a programmatic caller can
+# configure/silence/redirect wikiextractor's own output independently
+# of anything else running in the same process.
+wikiextractor_logger = logging.getLogger('wikiextractor')
+
+# Separate from wikiextractor_logger above and from extract.py's own
+# 'wikiextractor.extract' logger (which covers the extraction
+# mechanics themselves -- template substitution, link processing,
+# etc., under --debug): this one covers map/reduce coordination --
+# per-page timing, queue dispatch, reducer progress, and
+# worker/reducer liveness -- under --debug_map_reduce. Named and
+# configured independently so any of the three can be enabled without
+# the others.
 mapreduce_logger = logging.getLogger('wikiextractor.mapreduce')
 
 
 def configure_mapreduce_logging(enabled):
     """
     Sets mapreduce_logger's level and gives it its own handler/format
-    (including a timestamp, %(asctime)s -- the root logger's own
+    (including a timestamp, %(asctime)s -- wikiextractor_logger's own
     format has none) with propagate=False, so its messages go out
-    through this handler only, not duplicated via the root logger's.
+    through this handler only, never duplicated via wikiextractor_logger's.
 
     Must be called at the start of extract_process() and
     reduce_process() specifically, not just once in the parent: both
@@ -115,18 +124,36 @@ def configure_mapreduce_logging(enabled):
     mapreduce_logger.propagate = False
 
 
-def configure_root_logging(log_level):
+def configure_wikiextractor_logging(log_level):
     """
-    Sets the root logger's own level and format -- same reasoning and
-    same required call sites as configure_mapreduce_logging() above
-    (start of extract_process() and reduce_process(), not just once in main()).
+    Sets wikiextractor_logger's own level and gives it its own
+    handler/format, with propagate=False -- same pattern as
+    configure_mapreduce_logging() above, and the same reasoning for
+    why: this keeps wikiextractor's own logging entirely off the root
+    logger, so nothing here touches process-wide logging state that a
+    programmatic caller (embedding this as a library rather than
+    running it as a CLI script) might have configured for their own,
+    unrelated purposes. extract.py's own 'wikiextractor.extract'
+    logger is a child of this one by name and has no explicit level
+    or handler of its own, so its messages simply propagate up to and
+    render through this handler -- inheriting this level by default,
+    while still independently overridable by a caller who wants
+    different verbosity for just the extraction-mechanics messages
+    (logging.getLogger('wikiextractor.extract').setLevel(...)).
 
-    On a spawn, main()'s own logging.basicConfig()/logger.setLevel() calls
-    never ran in that process at all, so this call sets up the logging
-    for the children processes.
+    Must be called at the start of extract_process() and
+    reduce_process() specifically, not just once in main(): both are
+    real multiprocessing.Process instances, and under the "spawn"
+    start method (unlike "fork"), a child re-imports the module fresh
+    and does NOT inherit a level set on the parent's already-running
+    logger after import.
     """
-    logging.basicConfig(format='%(levelname)s: %(message)s')
-    logging.getLogger().setLevel(log_level)
+    wikiextractor_logger.setLevel(log_level)
+    if not wikiextractor_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+        wikiextractor_logger.addHandler(handler)
+    wikiextractor_logger.propagate = False
 
 ##
 # The namespace used for template definitions
@@ -360,10 +387,10 @@ def load_templates(file, output_file=None, encoding='utf-8', templates=None, red
             page = []
             articles += 1
             if articles % 100000 == 0:
-                logging.info("Preprocessed %d pages", articles)
+                wikiextractor_logger.info("Preprocessed %d pages", articles)
     if output_file:
         output.close()
-        logging.info("Saved %d templates to '%s'", template_count, output_file)
+        wikiextractor_logger.info("Saved %d templates to '%s'", template_count, output_file)
     return template_count, template_prefix
 
 
@@ -571,7 +598,7 @@ def load_and_compact_templates(template_file, input_file, input, template_prefix
     redirects_builder = template_blob.StreamingTemplateBlobBuilder()
     template_load_start = default_timer()
     if template_file and os.path.exists(template_file):
-        logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
+        wikiextractor_logger.info("Preprocessing '%s' to collect template definitions: this may take some time.", template_file)
         file = decode_open(template_file)
         template_count, template_prefix = load_templates(
             file, blob_builder=builder, redirects_blob_builder=redirects_builder,
@@ -581,13 +608,13 @@ def load_and_compact_templates(template_file, input_file, input, template_prefix
         if input_file == '-':
             # can't scan then reset stdin; must error w/ suggestion to specify template_file
             raise ValueError("to use templates with stdin dump, must supply explicit template-file")
-        logging.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
+        wikiextractor_logger.info("Preprocessing '%s' to collect template definitions: this may take some time.", input_file)
         template_count, template_prefix = load_templates(
             input, template_file, blob_builder=builder, redirects_blob_builder=redirects_builder,
             template_prefix=template_prefix)
         input.close()
         input = decode_open(input_file)
-    logging.info("Loaded %d templates in %.1fs", template_count, default_timer() - template_load_start)
+    wikiextractor_logger.info("Loaded %d templates in %.1fs", template_count, default_timer() - template_load_start)
 
     # See template_blob.py's own module docstring for why compaction
     # itself is necessary (fork()'s copy-on-write doesn't protect a
@@ -600,7 +627,7 @@ def load_and_compact_templates(template_file, input_file, input, template_prefix
     compact_start = default_timer()
     template_blob_ctx = template_blob.compact_blobs(*builder.finish())
     redirects_blob_ctx = template_blob.compact_blobs(*redirects_builder.finish())
-    logging.info("Compacted templates and redirects into shared memory in %.1fs",
+    wikiextractor_logger.info("Compacted templates and redirects into shared memory in %.1fs",
                  default_timer() - compact_start)
     return template_blob_ctx, redirects_blob_ctx, input, template_prefix
 
@@ -630,11 +657,14 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         every worker and every Extractor(...) constructed anywhere in
         this run -- no piece of it is a shared global read implicitly
         by anything.
-    :param log_level: the root logger's own level, as set up in
-        main() -- passed through to reduce_process()/extract_process()
-        so each can reapply it via configure_root_logging(), since
-        main()'s own logging.basicConfig()/logger.setLevel() calls
-        never run in a process started via "spawn" at all.
+    :param log_level: wikiextractor_logger's own level, as set up in
+        main() by calling configure_wikiextractor_logging() (not the
+        root logger, so this stays independent of any logging setup
+        a programmatic caller has done for their own purposes) --
+        passed through to reduce_process()/extract_process() so each
+        can call that same function again itself, since a process
+        started via "spawn" re-imports the module fresh and does not
+        inherit a level set on the parent's already-running logger.
     """
     extractor_kwargs = dict(extractor_kwargs) if extractor_kwargs else {}
 
@@ -686,7 +716,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     with template_blob_ctx as (_wrapper, template_blob_names), \
             redirects_blob_ctx as (_redirects_wrapper, redirects_blob_names):
         # process pages
-        logging.info("Starting page extraction from %s.", input_file)
+        wikiextractor_logger.info("Starting page extraction from %s.", input_file)
         extract_start = default_timer()
 
         # Parallel Map/Reduce:
@@ -765,7 +795,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
         jobs_queue = mp_context.Queue(maxsize=maxsize)
 
         # start worker processes
-        logging.info("Using %d extract processes.", process_count)
+        wikiextractor_logger.info("Using %d extract processes.", process_count)
         workers = []
         for _ in range(max(1, process_count)):
             extractor = Process(target=extract_process,
@@ -831,7 +861,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
-    logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
+    wikiextractor_logger.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
                  process_count, ordinal, extract_duration, extract_rate)
 
 
@@ -887,15 +917,18 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
         these used to be a module- or class-level global a worker
         picked up implicitly (several genuinely broken that way -- see
         Extractor's own docstring), now plain, explicit arguments.
-    :param log_level: this process's own root logger level (see
-        configure_root_logging()) -- without this, template/#expr
-        warnings still show (they're already at WARNING, Python's own
-        default), but this worker's part of any INFO-level diagnostics
-        would silently be lost under "spawn", same underlying cause as
+    :param log_level: this process's own wikiextractor_logger level
+        (see configure_wikiextractor_logging()) -- without this, the
+        worker-summary WARNING line below would still show (Python's
+        own root logger defaults to an effective level of WARNING,
+        with a built-in "handler of last resort" for exactly this
+        case), but this worker's part of any INFO-level progress or
+        DETAIL-level per-article diagnostics would silently be lost
+        under "spawn", same underlying cause as
         debug_map_reduce/mapreduce_logger above.
     """
     extractor_kwargs = extractor_kwargs or {}
-    configure_root_logging(log_level)
+    configure_wikiextractor_logging(log_level)
     configure_mapreduce_logging(debug_map_reduce)
     worker_ctx = (template_blob.attach(template_blob_names) if template_blob_names is not None
                   else contextlib.nullcontext(None))
@@ -951,7 +984,7 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
             else:
                 break
     if articles_with_errors:
-        logging.warning(
+        wikiextractor_logger.warning(
             "Worker pid=%d finished: %d/%d articles had template errors -- "
             "title(%d) recursion(%d, %d, %d) loop(%d) expr(%d) total "
             "occurrences across this worker's articles (per-article detail "
@@ -979,9 +1012,9 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
         enabled, logs REDUCER_PROGRESS for every page written (ordinal,
         current buffer depth) -- shares the same logger as the workers'
         PAGE_START/PAGE_TIMING logging.
-    :param log_level: this process's own root logger level (see
-        configure_root_logging()) -- without this, every ordinary
-        logging.info()/logging.warning() call below (progress lines,
+    :param log_level: this process's own wikiextractor_logger level
+        (see configure_wikiextractor_logging()) -- without this, every
+        ordinary progress/status message below (progress lines,
         REDUCER_EXIT status) silently stops appearing under "spawn",
         since main()'s own level-setting code never runs in this
         process at all.
@@ -1000,12 +1033,12 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
     On exit, always logs the status of the exit (except in the case
     of a SIGKILL)
     """
-    configure_root_logging(log_level)
+    configure_wikiextractor_logging(log_level)
     configure_mapreduce_logging(debug_map_reduce)
     if out_file == '-':
         output = sys.stdout
         if file_compress:
-            logging.warning("writing to stdout, so no output compression "
+            wikiextractor_logger.warning("writing to stdout, so no output compression "
                              "(use an external tool)")
     else:
         nextFile = NextFile(out_file)
@@ -1029,7 +1062,7 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
                 # progress report
                 if next_ordinal % period == 0:
                     interval_rate = period / (default_timer() - interval_start)
-                    logging.info("Extracted %d articles (%.1f art/s)",
+                    wikiextractor_logger.info("Extracted %d articles (%.1f art/s)",
                                  next_ordinal, interval_rate)
                     interval_start = default_timer()
             else:
@@ -1040,7 +1073,7 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
                 ordinal, text = pair
                 ordering_buffer[ordinal] = text
     finally:
-        # Always logged (on the root logger, not gated by
+        # Always logged (on wikiextractor_logger, not gated by
         # --debug_map_reduce at all): whether this
         # process is exiting cleanly (every buffered page successfully
         # written, nothing left over) or with pages still stuck in
@@ -1052,13 +1085,13 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
         # appears -- the absence of it, following the last
         # REDUCER_PROGRESS line, is itself the signal.
         if ordering_buffer:
-            logging.warning(
+            wikiextractor_logger.warning(
                 "REDUCER_EXIT incomplete: next_ordinal=%d, %d page(s) still "
                 "buffered and never written: ordinals=%s",
                 next_ordinal, len(ordering_buffer),
                 sorted(ordering_buffer.keys())[:20])
         else:
-            logging.info("REDUCER_EXIT clean: wrote %d article(s) total",
+            wikiextractor_logger.info("REDUCER_EXIT clean: wrote %d article(s) total",
                          next_ordinal)
         # This process's own writes are buffered in its own memory.
         # Since this process now opens its own output itself (rather
@@ -1149,6 +1182,15 @@ def main():
 
     args = parser.parse_args()
 
+    log_level = logging.WARNING  # Python's own default
+    if not args.quiet:
+        log_level = logging.INFO
+    if args.verbose:
+        log_level = DETAIL  # between INFO (20) and DEBUG (10) -- see DETAIL's own definition
+    if args.debug:
+        log_level = logging.DEBUG
+    configure_wikiextractor_logging(log_level)
+
     keepLinks = args.links
     if args.html:
         keepLinks = True
@@ -1176,28 +1218,15 @@ def main():
         if file_size and file_size < minFileSize:
             raise ValueError()
     except ValueError:
-        logging.error('Insufficient or invalid size: %s', args.bytes)
+        wikiextractor_logger.error('Insufficient or invalid size: %s', args.bytes)
         return
 
-    FORMAT = '%(levelname)s: %(message)s'
-    logging.basicConfig(format=FORMAT)
-
-    logger = logging.getLogger()
-    log_level = logging.WARNING  # Python's own default
-    if not args.quiet:
-        log_level = logging.INFO
-    if args.verbose:
-        log_level = DETAIL  # between INFO (20) and DEBUG (10) -- see DETAIL's own definition
-    if args.debug:
-        log_level = logging.DEBUG
-    logger.setLevel(log_level)
-
     if args.json:
-        logger.debug("Outputting to json format")
+        wikiextractor_logger.debug("Outputting to json format")
     elif args.text:
-        logger.debug("Outputting to text format")
+        wikiextractor_logger.debug("Outputting to text format")
     else:
-        logger.debug("Outputting to <doc> format")
+        wikiextractor_logger.debug("Outputting to <doc> format")
 
     input_file = args.input
 
@@ -1249,7 +1278,7 @@ def main():
         try:
             os.makedirs(output_path)
         except:
-            logging.error('Could not create: %s', output_path)
+            wikiextractor_logger.error('Could not create: %s', output_path)
             return
 
     configure_mapreduce_logging(args.debug_map_reduce)
