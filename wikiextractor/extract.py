@@ -57,6 +57,88 @@ logging.addLevelName(DETAIL, 'DETAIL')
 
 # ----------------------------------------------------------------------
 
+# <nowiki>...</nowiki> marks its contents as literal text, exempt from
+# all wikitext parsing -- but findMatchingBraces() (used by
+# expandTemplates() to find {{...}} template-call boundaries, and by
+# splitParts() to split a call's own argument list on |) doesn't know
+# that: it just scans raw text for brace/bracket characters. A
+# template that uses <nowiki>}}</nowiki> to *display* the literal
+# characters "}}" -- a real, unremarkable pattern, e.g. inside an
+# error message explaining correct call syntax -- can prematurely
+# terminate an enclosing template call, silently truncating everything
+# after that point into unprocessed, literal leftover text. Confirmed
+# on real, live Wikipedia data: Template:Metadata population AT-1 (via
+# Template:Infobox settlement, one of the most widely-used templates
+# on the whole project) does exactly this in its own error-message
+# branch, which is reached by an easy-to-hit, unremarkable case
+# (calling it with an argument it doesn't recognize).
+#
+# Real MediaWiki avoids this by protecting <nowiki> regions during its
+# own preprocessing stage, before any brace-matching happens at all.
+# _mask_nowiki()/_unmask_nowiki() do the same here: replace each
+# <nowiki>...</nowiki> span (tags included) with an opaque placeholder
+# containing no brace, bracket, or pipe character at all, so it can't
+# be misread as real template/link syntax or a real argument
+# separator, then restore the original span verbatim afterward.
+#
+# This has to run inside expandTemplates() itself, not once on the
+# original article text -- a <nowiki> sequence can arrive *mid-
+# expansion*, introduced by template substitution (exactly what
+# happens in the real Metadata population AT-1 case above), not just
+# by being present in the wikitext being scanned at the top of the
+# call stack. expandTemplate() and splitParts() never see raw text
+# directly -- only slices of whatever expandTemplates() already
+# scanned -- so masking in that one place protects every downstream
+# caller, at every level of recursion, without needing to change
+# expandTemplate(), splitParts(), or any of their own call sites.
+_NOWIKI_RE = re.compile(r'<nowiki\s*>(.*?)</nowiki\s*>', re.IGNORECASE | re.DOTALL)
+
+
+def _mask_nowiki(text):
+    """Replaces each <nowiki>...</nowiki> span in `text` (tags
+    included) with an opaque placeholder token -- a NUL-delimited
+    string containing no brace, bracket, or pipe character, so it
+    can't be misread as template/link syntax or an argument separator
+    by anything downstream. NUL bytes are never valid content in a
+    well-formed XML-sourced dump (XML itself forbids raw NUL bytes),
+    so collision with real article text is not a practical concern.
+
+    Skips the regex scan entirely (a cheap, common-case fast path)
+    when `text` has no "<nowiki" substring at all -- true for the
+    overwhelming majority of expandTemplates() calls, so this keeps
+    the added cost close to zero except where it's actually needed.
+
+    :return: (masked_text, placeholders) where placeholders is a dict
+        mapping each placeholder token back to the exact original
+        <nowiki>...</nowiki> text it replaced, or None if nothing was
+        masked (the common case) -- pass this straight through to
+        _unmask_nowiki() either way; it treats None as "nothing to
+        restore".
+    """
+    if '<nowiki' not in text.lower():
+        return text, None
+    placeholders = {}
+
+    def replace(m):
+        token = '\x00NOWIKI%d\x00' % len(placeholders)
+        placeholders[token] = m.group(0)
+        return token
+
+    return _NOWIKI_RE.sub(replace, text), placeholders
+
+
+def _unmask_nowiki(text, placeholders):
+    """Restores every placeholder token _mask_nowiki() produced back
+    to its original, exact <nowiki>...</nowiki> text. `placeholders`
+    being None (nothing was masked) or empty is a correct, cheap no-op.
+    """
+    if not placeholders:
+        return text
+    for token, original in placeholders.items():
+        text = text.replace(token, original)
+    return text
+
+
 # match tail after wikilink
 tailRE = re.compile(r'\w+')
 syntaxhighlight = re.compile('&lt;syntaxhighlight .*?&gt;(.*?)&lt;/syntaxhighlight&gt;', re.DOTALL)
@@ -1663,6 +1745,11 @@ class Extractor():
 
         # logger.debug('<expandTemplates ' + str(len(self.frame)))
 
+        # See _mask_nowiki()'s own comment above for why this has to
+        # happen here, on every call, rather than once on the
+        # original article text.
+        wikitext, nowiki_placeholders = _mask_nowiki(wikitext)
+
         cur = 0
         # look for matching {{...}}
         for s, e in findMatchingBraces(wikitext, 2):
@@ -1670,6 +1757,7 @@ class Extractor():
             cur = e
         # leftover
         res += wikitext[cur:]
+        res = _unmask_nowiki(res, nowiki_placeholders)
         # logger.debug('   expandTemplates> %d %s', len(self.frame), res)
         return res
 
