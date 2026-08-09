@@ -2576,6 +2576,66 @@ def sharp_formatnum(num, flag='', *args):
     return f'{value:,}'
 
 
+def _sharp_pad(string, width, padding='0', from_left=True):
+    """
+    Shared core for padleft/padright below -- the two real MediaWiki
+    functions differ only in which side gets padded. Matches PHP's
+    own str_pad() semantics, which real MediaWiki's implementation is
+    built on: the padding string is repeated as many times as needed
+    to cover the gap, then truncated to exactly that many characters
+    (not repeated a whole number of times and left over-long) before
+    being attached to the original string.
+
+    Real, worked example: padleft("1", 4, "xy") needs 3 characters of
+    padding (4 - len("1")). "xy" repeated is "xyxyxy...";  truncated
+    to 3 characters gives "xyx"; prepended to "1" gives "xyx1" -- not
+    "xyxy1" (which would be one whole extra repetition) and not "xy1"
+    (which would be short by one character).
+
+    :param width: target total length. Invalid or non-positive values
+        (can't sensibly pad to zero or a negative width) leave the
+        string unchanged rather than raising or truncating it --
+        matches real MediaWiki's own graceful degradation elsewhere
+        in this file (e.g. formatnum's forward mode on non-numeric
+        input) rather than an error a template author would never see
+        in their own rendered page.
+    :param padding: the string to repeat. An explicitly empty padding
+        string has nothing to repeat, so this also leaves the
+        original string unchanged rather than looping forever or
+        dividing by zero.
+    """
+    try:
+        width = int(width)
+    except (TypeError, ValueError):
+        return string
+    if not padding:
+        return string
+    needed = width - len(string)
+    if needed <= 0:
+        return string
+    pad_repeated = (padding * (needed // len(padding) + 1))[:needed]
+    if from_left:
+        return pad_repeated + string
+    else:
+        return string + pad_repeated
+
+
+def sharp_padleft(string, width, padding='0', *args):
+    """{{padleft: STRING | WIDTH | PADDING }} -- pads on the left
+    (prepends), matching real MediaWiki's own naming, which describes
+    which side gets the new padding characters -- not which side of
+    the original string they end up nearer to."""
+    return _sharp_pad(string, width, padding, from_left=True)
+
+
+def sharp_padright(string, width, padding='0', *args):
+    """{{padright: STRING | WIDTH | PADDING }} -- pads on the right
+    (appends). Same padding-string repeat-then-truncate semantics as
+    padleft -- see _sharp_pad()'s own docstring."""
+    return _sharp_pad(string, width, padding, from_left=False)
+
+
+
 # Extension Scribuntu
 # Only minimal support for Lua modules invoked via #invoke.
 # FIXME: import real Lua modules (would require a Lua interpreter,
@@ -2660,7 +2720,9 @@ parserFunctions = {
 
     'int': lambda string, *rest: str(int(string)),
 
-    'padleft': lambda char, width, string: string.ljust(char, int(pad)), # CHECK_ME
+    'padleft': sharp_padleft,
+
+    'padright': sharp_padright,
 
     'formatnum': sharp_formatnum,
 
