@@ -40,6 +40,21 @@ import time
 # be enabled without the other.
 logger = logging.getLogger('wikiextractor.extract')
 
+# A level between INFO (20) and DEBUG (10), for output that's too
+# granular for every run (per-article detail: which specific page had
+# which specific issue) but far too much to require full DEBUG
+# tracing to see at all (DEBUG here also includes low-level extraction
+# mechanics -- template invocation, parameter substitution -- entirely
+# unrelated to "which pages have errors" and vastly more voluminous).
+# Currently used for exactly one thing: the per-article error summary
+# in Extractor.extract() below. Registered globally via
+# addLevelName() so logger.log(DETAIL, ...) renders as "DETAIL: ..."
+# rather than a bare, unlabeled number; WikiExtractor.py's own CLI
+# (--verbose) sets a logger's threshold to this value the same way it
+# does for the standard levels.
+DETAIL = 15
+logging.addLevelName(DETAIL, 'DETAIL')
+
 # ----------------------------------------------------------------------
 
 # match tail after wikilink
@@ -1590,9 +1605,25 @@ class Extractor():
                 self.template_loop_errs,
                 self.malformed_expr_errs)
         if any(errs):
-            logger.warning("Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d) "
-                         "loop(%d) expr(%d)",
-                         self.title, self.id, *errs)
+            # DETAIL, not WARNING and not DEBUG: on a real, full-wiki
+            # run, a single common broken shared template can leave a
+            # large fraction of all articles with some nonzero count
+            # here, which turns "one WARNING line per article" into
+            # hundreds of thousands of lines -- individually genuine,
+            # but collectively drowning out everything else in the
+            # log. extract_process() in WikiExtractor.py now
+            # aggregates these same six counters across every article
+            # a worker processes and logs one WARNING-level summary
+            # per worker when it finishes; that's the line to look at
+            # first for gauging scope. This per-article line is for
+            # the next step down -- digging into which specific pages
+            # have issues -- without requiring full DEBUG tracing
+            # (which also includes low-level extraction mechanics
+            # entirely unrelated to this, and is vastly more
+            # voluminous). See DETAIL's own definition above.
+            logger.log(DETAIL, "Template errors in article '%s' (%s): title(%d) recursion(%d, %d, %d) "
+                       "loop(%d) expr(%d)",
+                       self.title, self.id, *errs)
 
     # ----------------------------------------------------------------------
     # Expand templates

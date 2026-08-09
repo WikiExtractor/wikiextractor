@@ -72,7 +72,7 @@ from multiprocessing import get_context, cpu_count
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, \
-    resolve_template_page, _DEFAULT_IGNORED_TAG_PATTERNS
+    resolve_template_page, _DEFAULT_IGNORED_TAG_PATTERNS, DETAIL
 from . import template_blob
 
 # ===========================================================================
@@ -901,6 +901,24 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
                   else contextlib.nullcontext(None))
     redirects_ctx = (template_blob.attach(redirects_blob_names) if redirects_blob_names is not None
                       else contextlib.nullcontext(None))
+    # Aggregated across every article this worker processes, logged as
+    # a single summary line when the worker exits -- not per article.
+    # A real, full-wiki run can have a large fraction of all articles
+    # report *some* template/#expr issue (a single common, broken
+    # shared template reaches many pages), which turns "one WARNING
+    # line per problematic article" into hundreds of thousands of
+    # lines in practice -- individually still deduped and genuine, but
+    # collectively drowning out anything else in the log. The
+    # per-article detail (extract.py's own "Template errors in
+    # article..." line) still exists, at the DETAIL level (between
+    # INFO and DEBUG, see extract.py's own DETAIL definition) enabled
+    # via --verbose, for digging into which specific pages have
+    # issues without the much larger volume of low-level extraction-
+    # mechanics tracing --debug also includes. This worker-level total
+    # is what's actually useful for a first pass at gauging scope.
+    articles_processed = 0
+    articles_with_errors = 0
+    total_errs = [0, 0, 0, 0, 0, 0]  # title, recursion(1,2,3), loop, expr
     with worker_ctx as worker_templates, redirects_ctx as worker_redirects:
         while True:
             job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
@@ -910,8 +928,9 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
                 mapreduce_logger.debug("PAGE_START pid=%d ordinal=%d id=%s title=%r",
                                        os.getpid(), ordinal, page_id, title)
                 out = StringIO()  # memory buffer
-                Extractor(*job[:-1], templates=worker_templates,
-                          redirects=worker_redirects, **extractor_kwargs).extract(out, html_safe)  # (id, urlbase, title, page)
+                extractor = Extractor(*job[:-1], templates=worker_templates,
+                                       redirects=worker_redirects, **extractor_kwargs)
+                extractor.extract(out, html_safe)  # (id, urlbase, title, page)
                 finish = time.time()
                 mapreduce_logger.debug(
                     "PAGE_TIMING pid=%d ordinal=%d id=%s title=%r elapsed=%.2fs",
@@ -919,8 +938,25 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
                 text = out.getvalue()
                 output_queue.put((job[-1], text))  # (ordinal, extracted_text)
                 out.close()
+                articles_processed += 1
+                errs = (extractor.template_title_errs,
+                        extractor.recursion_exceeded_1_errs,
+                        extractor.recursion_exceeded_2_errs,
+                        extractor.recursion_exceeded_3_errs,
+                        extractor.template_loop_errs,
+                        extractor.malformed_expr_errs)
+                if any(errs):
+                    articles_with_errors += 1
+                    total_errs = [t + e for t, e in zip(total_errs, errs)]
             else:
                 break
+    if articles_with_errors:
+        logging.warning(
+            "Worker pid=%d finished: %d/%d articles had template errors -- "
+            "title(%d) recursion(%d, %d, %d) loop(%d) expr(%d) total "
+            "occurrences across this worker's articles (per-article detail "
+            "available via --verbose)",
+            os.getpid(), articles_with_errors, articles_processed, *total_errs)
 
 
 def reduce_process(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition,
@@ -1083,6 +1119,13 @@ def main():
     groupS = parser.add_argument_group('Special')
     groupS.add_argument("-q", "--quiet", action="store_true",
                         help="suppress reporting progress info")
+    groupS.add_argument("--verbose", action="store_true",
+                        help="in addition to normal progress info, report which "
+                             "specific articles had template/#expr errors and how "
+                             "many of each (title/recursion/loop/expr).  "
+                             "Look at the per-worker WARNING summary first "
+                             "(shown regardless of this flag) to gauge overall scope, "
+                             "then use --verbose to see which specific pages to target.")
     groupS.add_argument("--debug", action="store_true",
                         help="print debug info")
     groupS.add_argument("--debug_map_reduce", action="store_true",
@@ -1143,6 +1186,8 @@ def main():
     log_level = logging.WARNING  # Python's own default
     if not args.quiet:
         log_level = logging.INFO
+    if args.verbose:
+        log_level = DETAIL  # between INFO (20) and DEBUG (10) -- see DETAIL's own definition
     if args.debug:
         log_level = logging.DEBUG
     logger.setLevel(log_level)

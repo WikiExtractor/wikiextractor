@@ -237,7 +237,14 @@ class ErrorSummaryReportingTests(TemplateLoopGuardTestCase):
         root_logger = logging.getLogger()
         original_level = root_logger.level
         root_logger.addHandler(handler)
-        root_logger.setLevel(logging.WARNING)
+        # DEBUG, not WARNING: the per-article summary moved to DEBUG
+        # -- see extract()'s own comment for why (a common broken
+        # shared template can flag a large fraction of all articles on
+        # a real run, and one WARNING line per article at that scale
+        # drowns out everything else). extract_process() now logs a
+        # WARNING-level aggregate per worker instead; that's covered
+        # separately in test_extract_process_worker_summary.py.
+        root_logger.setLevel(logging.DEBUG)
         try:
             out = StringIO()
             extractor.extract(out, html_safe=True)
