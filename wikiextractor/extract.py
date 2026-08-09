@@ -92,6 +92,13 @@ logging.addLevelName(DETAIL, 'DETAIL')
 # caller, at every level of recursion, without needing to change
 # expandTemplate(), splitParts(), or any of their own call sites.
 _NOWIKI_RE = re.compile(r'<nowiki\s*>(.*?)</nowiki\s*>', re.IGNORECASE | re.DOTALL)
+# A separate, cheaper pattern for the common-case presence check below
+# -- just the opening tag, no DOTALL/closing-tag search needed for
+# that. re.search() with IGNORECASE doesn't need to allocate a
+# lowercased copy of `text` the way `'<nowiki' not in text.lower()`
+# does, which matters here since this runs on every expandTemplates()
+# call, the vast majority of which have no <nowiki> at all.
+_NOWIKI_PRESENCE_RE = re.compile(r'<nowiki', re.IGNORECASE)
 
 
 def _mask_nowiki(text):
@@ -103,10 +110,11 @@ def _mask_nowiki(text):
     well-formed XML-sourced dump (XML itself forbids raw NUL bytes),
     so collision with real article text is not a practical concern.
 
-    Skips the regex scan entirely (a cheap, common-case fast path)
-    when `text` has no "<nowiki" substring at all -- true for the
-    overwhelming majority of expandTemplates() calls, so this keeps
-    the added cost close to zero except where it's actually needed.
+    Skips the substitution regex entirely (a cheap, common-case fast
+    path, via the separate _NOWIKI_PRESENCE_RE above) when `text` has
+    no "<nowiki" substring at all -- true for the overwhelming
+    majority of expandTemplates() calls, so this keeps the added cost
+    close to zero except where it's actually needed.
 
     :return: (masked_text, placeholders) where placeholders is a dict
         mapping each placeholder token back to the exact original
@@ -115,7 +123,7 @@ def _mask_nowiki(text):
         _unmask_nowiki() either way; it treats None as "nothing to
         restore".
     """
-    if '<nowiki' not in text.lower():
+    if not _NOWIKI_PRESENCE_RE.search(text):
         return text, None
     placeholders = {}
 
@@ -125,6 +133,7 @@ def _mask_nowiki(text):
         return token
 
     return _NOWIKI_RE.sub(replace, text), placeholders
+
 
 
 def _unmask_nowiki(text, placeholders):
