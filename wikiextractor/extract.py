@@ -2104,6 +2104,29 @@ def splitParts(paramsList):
     return parameters
 
 
+# findMatchingBraces() is called extremely frequently -- recursively,
+# once per expandTemplates()/subst()/splitParts() invocation, at every
+# level of template nesting -- but only ever with ldelim in {0, 2, 3}:
+# confirmed directly, every call site in this file (and every direct
+# call in this project's own tests) uses one of these three literal
+# values. Pre-compiling the (reOpen, reNext) pair for each here, once,
+# at import time, avoids re-running re.compile() (itself non-trivial:
+# '%'-formatting a pattern string, plus a cache lookup, on every single
+# call even when the underlying compiled pattern ends up the same) --
+# confirmed via profiling a real extraction run: re.compile() alone
+# accounted for a measurable, entirely avoidable share of total time,
+# called as many times as findMatchingBraces() itself was.
+def _build_brace_patterns(ldelim):
+    if ldelim:  # 2-3
+        return (re.compile(r'[{]{%d,}' % ldelim),  # at least ldelim
+                re.compile(r'[{]{2,}|}{2,}'))  # at least 2 open or close braces
+    return (re.compile(r'{{2,}|\[{2,}'),
+            re.compile(r'{{2,}|}{2,}|\[{2,}|]{2,}'))  # at least 2
+
+
+_BRACE_PATTERNS = {ldelim: _build_brace_patterns(ldelim) for ldelim in (0, 2, 3)}
+
+
 def findMatchingBraces(text, ldelim=0):
     """
     :param ldelim: number of braces to match. 0 means match [[]], {{}} and {{{}}}.
@@ -2142,12 +2165,11 @@ def findMatchingBraces(text, ldelim=0):
     # as well as expressions with stray }:
     #   {{{link|{{ucfirst:{{{1}}}}}} interchange}}}
 
-    if ldelim:  # 2-3
-        reOpen = re.compile(r'[{]{%d,}' % ldelim)  # at least ldelim
-        reNext = re.compile(r'[{]{2,}|}{2,}')  # at least 2 open or close bracces
-    else:
-        reOpen = re.compile(r'{{2,}|\[{2,}')
-        reNext = re.compile(r'{{2,}|}{2,}|\[{2,}|]{2,}')  # at least 2
+    # Falls back to building fresh (uncached) if ever called with a
+    # value outside {0, 2, 3} -- slower, but still correct; every real
+    # call site and every direct test call already stays within the
+    # cached set, so this path is not expected to actually run.
+    reOpen, reNext = _BRACE_PATTERNS.get(ldelim) or _build_brace_patterns(ldelim)
 
     cur = 0
     while True:

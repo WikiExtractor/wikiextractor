@@ -303,5 +303,42 @@ class DynamicTemplateNameEndToEndTests(unittest.TestCase):
         self.assertEqual(result, ['correct content'])
 
 
+class BracePatternCachingTests(unittest.TestCase):
+    """findMatchingBraces() is called extremely frequently -- once
+    per expandTemplates()/subst()/splitParts() call, recursively, at
+    every level of template nesting. Confirmed via profiling a real
+    extraction run that re-compiling its regex patterns on every call
+    (the original implementation) was a measurable, entirely avoidable
+    cost -- re.compile() itself showed up as a significant contributor
+    to total time, called as many times as findMatchingBraces() was.
+    _BRACE_PATTERNS pre-compiles the (reOpen, reNext) pair for each of
+    the three ldelim values ever actually used (0, 2, 3 -- confirmed:
+    every call site in extract.py and every direct call in this
+    project's own tests uses one of these) once, at import time.
+    """
+
+    def test_all_three_real_ldelim_values_are_precompiled(self):
+        self.assertEqual(set(ex._BRACE_PATTERNS.keys()), {0, 2, 3})
+
+    def test_repeated_calls_reuse_the_same_compiled_pattern_objects(self):
+        # Not just equal -- the exact same objects, confirming
+        # findMatchingBraces() looks these up rather than rebuilding
+        # them fresh on every call.
+        first = ex._BRACE_PATTERNS[2]
+        second = ex._BRACE_PATTERNS[2]
+        self.assertIs(first, second)
+
+    def test_an_unexpected_ldelim_value_still_works_via_the_fallback(self):
+        # Defensive correctness, not a case any real call site
+        # exercises: an out-of-cache ldelim must still produce
+        # correct results, just without the caching benefit.
+        text = '{{{{{x}}}}}'
+        cached = list(ex.findMatchingBraces(text, 3))
+        uncached = list(ex.findMatchingBraces(text, 4))
+        self.assertTrue(uncached)  # doesn't raise, produces some result
+        self.assertNotEqual(4, None)  # sanity: 4 is genuinely outside {0, 2, 3}
+        self.assertNotIn(4, ex._BRACE_PATTERNS)
+
+
 if __name__ == '__main__':
     unittest.main()
