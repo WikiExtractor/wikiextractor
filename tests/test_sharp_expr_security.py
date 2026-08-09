@@ -134,7 +134,7 @@ class SharpExprSecurityTests(unittest.TestCase):
         # actually malformed. page_title/page_id, when supplied (as
         # expandTemplate() does for every real call), make a failure
         # directly traceable back to the article instead.
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             result = ex.sharp_expr("3in5", page_title="Some Article", page_id="123")
         self.assertEqual(result, self.ERROR_SPAN)
         self.assertEqual(len(logs.output), 1)
@@ -149,7 +149,7 @@ class SharpExprSecurityTests(unittest.TestCase):
         # that: it's what shows up if the caller is watching logs
         # rather than inspecting the return value directly, and costs
         # nothing extra to include.
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             result = ex.sharp_expr("3in5")
         self.assertEqual(result, self.ERROR_SPAN)
         self.assertEqual(len(logs.output), 1)
@@ -158,7 +158,7 @@ class SharpExprSecurityTests(unittest.TestCase):
 
     def test_valid_expr_logs_nothing_even_with_page_info(self):
         with self.assertRaises(AssertionError):
-            with self.assertLogs('wikiextractor.extract', level='WARNING'):
+            with self.assertLogs('wikiextractor.extract', level='DEBUG'):
                 ex.sharp_expr("2 + 3", page_title="Some Article", page_id="123")
 
     def test_string_literal_is_rejected_not_evaluated(self):
@@ -229,7 +229,7 @@ class SharpExprRepeatedFailureDedupTests(unittest.TestCase):
 
     def test_direct_calls_only_log_the_first_occurrence(self):
         extractor = self.make_extractor()
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             for _ in range(5):
                 result = ex.sharp_expr("3in5", page_title="Test Article", page_id="1",
                                         extractor=extractor)
@@ -242,7 +242,7 @@ class SharpExprRepeatedFailureDedupTests(unittest.TestCase):
         # per article" -- a second, genuinely different malformed
         # expression is still worth knowing about.
         extractor = self.make_extractor()
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             ex.sharp_expr("3in5", page_title="Test Article", page_id="1", extractor=extractor)
             ex.sharp_expr("3in5", page_title="Test Article", page_id="1", extractor=extractor)
             ex.sharp_expr("4in6", page_title="Test Article", page_id="1", extractor=extractor)
@@ -256,7 +256,7 @@ class SharpExprRepeatedFailureDedupTests(unittest.TestCase):
         first_extractor = self.make_extractor()
         second_extractor = ex.Extractor(2, "2", "https://test.wikipedia.org/wiki?curid=2",
                                          "Second Article", [])
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             ex.sharp_expr("3in5", page_title="Test Article", page_id="1", extractor=first_extractor)
             ex.sharp_expr("3in5", page_title="Second Article", page_id="2", extractor=second_extractor)
         self.assertEqual(len(logs.output), 2)
@@ -275,7 +275,7 @@ class SharpExprRepeatedFailureDedupTests(unittest.TestCase):
         extractor = ex.Extractor(1, "1", "https://test.wikipedia.org/wiki?curid=1",
                                   "Test Article", [article_text], templates=templates,
                                   redirects=redirects, templatePrefix='Template:')
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             extractor.clean_text(article_text, expand_templates=True)
         expr_warnings = [line for line in logs.output if 'Malformed #expr' in line]
         self.assertEqual(len(expr_warnings), 1)
@@ -315,7 +315,7 @@ class SharpExprCascadeSuppressionTests(unittest.TestCase):
                           "test setup sanity check: every cascade expression must be distinct, "
                           "or this test wouldn't be distinguishing cascade suppression from the "
                           "ordinary exact-match dedup tested elsewhere")
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             for e in cascade_exprs:
                 ex.sharp_expr(e, page_title="Test Article", page_id="1", extractor=extractor)
         self.assertEqual(len(logs.output), 1)
@@ -328,7 +328,7 @@ class SharpExprCascadeSuppressionTests(unittest.TestCase):
         # useful, actionable one, and must not be swallowed by cascade
         # suppression (which only applies to the *downstream* links).
         extractor = self.make_extractor()
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             ex.sharp_expr("3in5", page_title="Test Article", page_id="1", extractor=extractor)
             ex.sharp_expr(ex._SHARP_EXPR_ERROR_SPAN + " + 1", page_title="Test Article",
                           page_id="1", extractor=extractor)
@@ -342,7 +342,7 @@ class SharpExprCascadeSuppressionTests(unittest.TestCase):
         # malformed expression elsewhere in the same article is still
         # worth its own warning.
         extractor = self.make_extractor()
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             ex.sharp_expr(ex._SHARP_EXPR_ERROR_SPAN + " + 1", page_title="Test Article",
                           page_id="1", extractor=extractor)
             ex.sharp_expr("4in6", page_title="Test Article", page_id="1", extractor=extractor)
@@ -354,7 +354,7 @@ class SharpExprCascadeSuppressionTests(unittest.TestCase):
         # inherit cascade suppression from a previous one.
         first_extractor = self.make_extractor(page_id=1)
         second_extractor = self.make_extractor(page_id=2)
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             ex.sharp_expr(ex._SHARP_EXPR_ERROR_SPAN + " + 1", page_title="Test Article",
                           page_id="1", extractor=first_extractor)
             ex.sharp_expr(ex._SHARP_EXPR_ERROR_SPAN + " + 1", page_title="Test Article",
@@ -367,7 +367,7 @@ class SharpExprCascadeSuppressionTests(unittest.TestCase):
         # run through the full clean_text() pipeline.
         extractor = self.make_extractor()
         wikitext = "{{#expr: {{#expr: {{#expr: 3in5 }} + 1 }} + 2 }}"
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             extractor.clean_text(wikitext, expand_templates=True)
         expr_warnings = [line for line in logs.output if 'Malformed #expr' in line]
         # The innermost failure (3in5) is the root, standalone one;
@@ -410,14 +410,14 @@ class SharpIfexprTests(unittest.TestCase):
         # #ifeq never fail this way at all, since their own condition
         # is a plain string comparison, never itself evaluated as an
         # expression.
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             result = ex.sharp_ifexpr("commodity", "yes", "no")
         self.assertEqual(result, ex._SHARP_EXPR_ERROR_SPAN)
         self.assertIn('Malformed #expr', logs.output[0])
 
     def test_malformed_condition_shares_the_same_per_article_dedup_as_expr(self):
         extractor = ex.Extractor(1, "1", "https://x", "Test Article", [])
-        with self.assertLogs('wikiextractor.extract', level='WARNING') as logs:
+        with self.assertLogs('wikiextractor.extract', level='DEBUG') as logs:
             for _ in range(3):
                 ex.sharp_ifexpr("commodity", "yes", "no", page_title="Test Article",
                                 page_id="1", extractor=extractor)

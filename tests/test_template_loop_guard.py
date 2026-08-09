@@ -205,7 +205,7 @@ class WarningLogDeduplicationTests(TemplateLoopGuardTestCase):
         root_logger = logging.getLogger()
         original_level = root_logger.level
         root_logger.addHandler(handler)
-        root_logger.setLevel(logging.WARNING)
+        root_logger.setLevel(logging.DEBUG)
         try:
             extractor.clean_text(article_text, expand_templates=True)
         finally:

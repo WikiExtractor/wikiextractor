@@ -1878,10 +1878,11 @@ class Extractor():
             loopKey = (self.id, title)
             if loopKey not in self.warned_loop_keys:
                 self.warned_loop_keys.add(loopKey)
-                logger.warning("Template loop detected: %s (article %s, id %s) -- "
-                                 "leaving unexpanded (further repeats in this "
-                                 "article are counted but not logged)",
-                                 title, self.title, self.id)
+                logger.debug("Template loop detected: %s (article %s, id %s) -- "
+                              "leaving unexpanded (further repeats in this article "
+                              "are counted, see the per-article WARNING-level "
+                              "summary, but not logged individually)",
+                              title, self.title, self.id)
             return '{{' + body + '}}'
 
         # Perform parameter substitution
@@ -2357,10 +2358,15 @@ def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
         # The same malformed #expr call is frequently invoked many
         # times over within a single article (e.g. once per row of a
         # table built from a broken shared template) -- one genuine
-        # occurrence can otherwise produce hundreds of identical log
-        # lines. Same dedup shape as expandTemplate()'s own loop
-        # detection: count every occurrence, but only log the first
-        # one per (article, expression) pair.
+        # occurrence can otherwise produce hundreds of near-identical
+        # log lines. Same dedup shape as expandTemplate()'s own loop
+        # detection: count every occurrence (reflected in the single
+        # per-article WARNING-level summary logged at the end of
+        # extract(), which is what's actually useful for deciding
+        # which pages are worth targeting), but only log the first
+        # one per (article, expression) pair, and only at DEBUG --
+        # detail for digging into a specific already-identified page,
+        # not something that should show up at default verbosity.
         #
         # A second, distinct source of noise this same dedup can't
         # catch: nested #expr calls, e.g. {{#expr:{{#expr:X-1}}+1}},
@@ -2377,12 +2383,13 @@ def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
                     return _SHARP_EXPR_ERROR_SPAN
                 extractor.warned_expr_keys.add(cascadeKey)
             if page_title is not None:
-                logger.warning("Malformed #expr: %r (article %s, id %s) -- this looks like "
-                               "a chain of nested #expr calls; further such chained failures "
-                               "in this article are counted but not logged",
-                               orig_expr, page_title, page_id)
+                logger.debug("Malformed #expr: %r (article %s, id %s) -- this looks like "
+                              "a chain of nested #expr calls; further such chained failures "
+                              "in this article are counted (see the per-article WARNING-level "
+                              "summary) but not logged individually",
+                              orig_expr, page_title, page_id)
             else:
-                logger.warning("Malformed #expr: %r", orig_expr)
+                logger.debug("Malformed #expr: %r", orig_expr)
             return _SHARP_EXPR_ERROR_SPAN
         if extractor is not None:
             extractor.malformed_expr_errs += 1
@@ -2391,11 +2398,12 @@ def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
                 return _SHARP_EXPR_ERROR_SPAN
             extractor.warned_expr_keys.add(exprKey)
         if page_title is not None:
-            logger.warning("Malformed #expr: %r (article %s, id %s) -- further identical "
-                           "occurrences in this article are counted but not logged",
-                           orig_expr, page_title, page_id)
+            logger.debug("Malformed #expr: %r (article %s, id %s) -- further identical "
+                          "occurrences in this article are counted (see the per-article "
+                          "WARNING-level summary) but not logged individually",
+                          orig_expr, page_title, page_id)
         else:
-            logger.warning("Malformed #expr: %r", orig_expr)
+            logger.debug("Malformed #expr: %r", orig_expr)
         return _SHARP_EXPR_ERROR_SPAN
 
 
