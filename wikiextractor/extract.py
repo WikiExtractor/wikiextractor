@@ -2515,6 +2515,67 @@ def sharp_switch(primary, *params):
     return ''
 
 
+# Digit sets used by some wikis for "national digit" display, mapped
+# back to plain ASCII for formatnum's reverse (|R) mode. Each mapping
+# is a fixed, one-to-one character substitution with no locale
+# ambiguity -- unlike thousands-separator conventions, which
+# genuinely differ by locale in ways that can't be safely guessed
+# from the text alone (e.g. "1.234" means 1234 in some locales, 1.234
+# in others). Covers Arabic-Indic and Extended Arabic-Indic (used by
+# Persian, Urdu, and other Arabic-script wikis) since those are the
+# ones actually observed in practice; add more sets here if another
+# wiki's real output needs them.
+_FORMATNUM_LOCAL_DIGITS = str.maketrans(
+    '٠١٢٣٤٥٦٧٨٩'   # Arabic-Indic
+    '۰۱۲۳۴۵۶۷۸۹',  # Extended Arabic-Indic (Persian/Urdu)
+    '01234567890123456789'
+)
+
+
+def sharp_formatnum(num, flag='', *args):
+    """
+    {{formatnum: NUM }} / {{formatnum: NUM | R }} -- note no '#'
+    prefix, unlike most parser functions here; matches real
+    MediaWiki's own syntax for this one.
+
+    Real MediaWiki's formatnum is locale-dependent: which digit-
+    grouping convention to use, and whether to substitute "national"
+    digits (e.g. Urdu ۰-۹), both come from the source wiki's own
+    language configuration -- which nothing in this codebase tracks
+    (there's no concept of "which wiki this dump is from" anywhere).
+    This is necessarily an approximation, not an exact match for
+    every wiki's own output.
+
+    Reverse mode (flag == 'R') is the direction actually exercised by
+    real, on-wiki templates chaining into #expr arithmetic (e.g.
+    {{formatnum:{{{1}}}|R}} to normalize an argument before doing
+    math on it -- confirmed directly: this is exactly what left every
+    #ifexpr comparison in a real, on-wiki Format price template
+    blank before this existed, since the value being compared was
+    always empty). This direction is safe to implement precisely:
+    strip comma grouping and map known local digit sets back to
+    ASCII, both fixed, context-free substitutions with no locale
+    guessing involved.
+
+    Forward mode (the default, no |R) inserts comma thousands
+    separators only -- the English-Wikipedia convention, and the most
+    common on Wikipedia overall -- and does NOT attempt national-
+    digit output, since that would require knowing the source wiki's
+    own language settings. Non-numeric input is returned unchanged in
+    forward mode, matching real MediaWiki's own graceful degradation
+    rather than raising.
+    """
+    if flag.strip() == 'R':
+        return num.replace(',', '').translate(_FORMATNUM_LOCAL_DIGITS).strip()
+    try:
+        value = float(num)
+    except ValueError:
+        return num
+    if value == int(value):
+        return f'{int(value):,}'
+    return f'{value:,}'
+
+
 # Extension Scribuntu
 # Only minimal support for Lua modules invoked via #invoke.
 # FIXME: import real Lua modules (would require a Lua interpreter,
@@ -2600,6 +2661,8 @@ parserFunctions = {
     'int': lambda string, *rest: str(int(string)),
 
     'padleft': lambda char, width, string: string.ljust(char, int(pad)), # CHECK_ME
+
+    'formatnum': sharp_formatnum,
 
 }
 
