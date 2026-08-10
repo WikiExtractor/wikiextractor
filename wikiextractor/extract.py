@@ -401,8 +401,9 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     text = text.replace('\t', ' ')
     text = spaces.sub(' ', text)
     text = dots.sub('...', text)
-    text = re.sub(r' (,:\.\)\]»)', r'\1', text)
-    text = re.sub(r'(\[\(«) ', r'\1', text)
+    # remove space before closing / after opening punctuation
+    text = re.sub(r' ([,:.\)\]»])', r'\1', text)
+    text = re.sub(r'([\[\(«]) ', r'\1', text)
     text = re.sub(r'\n\W+?\n', '\n', text, flags=re.U)  # lines with only punctuations
     text = text.replace(',,', ',').replace(',.', '.')
     if html_safe:
