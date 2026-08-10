@@ -2477,6 +2477,20 @@ def _sharp_expr_eval_node(node):
             raise ValueError(f"unary operator not permitted in #expr: {type(node.op).__name__}")
         return op_func(_sharp_expr_eval_node(node.operand))
 
+    if isinstance(node, ast.Call):
+        # "trunc EXPR" gets pre-processed (see sharp_expr() below) into
+        # "TRUNC(EXPR)". Recognized specifically as this exact shape --
+        # func is a bare Name 'TRUNC', exactly one positional argument,
+        # no keywords, no starargs -- not general-purpose function-call
+        # support, matching the narrow, specific-shape-only approach
+        # used for ROUND above. Any other call shape (a different name,
+        # wrong argument count, keyword arguments) falls through to the
+        # same ValueError every other disallowed node type gets.
+        if (isinstance(node.func, ast.Name) and node.func.id == 'TRUNC'
+                and len(node.args) == 1 and not node.keywords):
+            return int(_sharp_expr_eval_node(node.args[0]))
+        raise ValueError("function calls are not permitted in #expr")
+
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1:
             raise ValueError("chained comparisons not supported in #expr")
@@ -2532,6 +2546,19 @@ def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
         expr = re.sub(r'\bmod\b', '%', expr)
         expr = re.sub(r'\bdiv\b', '/', expr)
         expr = re.sub(r'\bround\b', '|ROUND|', expr)
+        # "trunc EXPR" is #expr's own prefix, unary truncate-toward-
+        # zero operator -- real-world usage confirmed to always
+        # already parenthesize its operand ("trunc (150 * 800 / 532)"),
+        # which this relies on: only converts "trunc" to "TRUNC" when
+        # immediately followed by "(", so the result is always valid
+        # Python function-call syntax (the existing parens become the
+        # call's own parens) rather than guessing where an
+        # unparenthesized operand would end. _sharp_expr_eval_node()
+        # below recognizes only this exact "TRUNC(...)" shape -- one
+        # positional argument, no keywords, nothing else -- the same
+        # narrow, specific-shape-only approach as ROUND above, not
+        # general-purpose function-call support.
+        expr = re.sub(r'\btrunc\b(?=\s*\()', 'TRUNC', expr)
         # Malformed #expr input -- number directly adjacent to a
         # Python keyword, e.g. "3 in 5" -> "3in5" -- makes ast.parse()
         # emit SyntaxWarning: invalid decimal literal as a side effect
