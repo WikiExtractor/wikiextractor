@@ -78,7 +78,7 @@ from . import template_blob
 # ===========================================================================
 
 # Program version
-__version__ = '3.0.8'
+__version__ = '3.1.0'
 
 # This module's own logger -- everything logged directly from
 # WikiExtractor.py (CLI progress, per-worker error summaries) goes
