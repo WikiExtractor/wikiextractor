@@ -2505,10 +2505,30 @@ def _sharp_expr_eval_node(node):
     raise ValueError(f"disallowed #expr element: {type(node).__name__}")
 
 
+# Converts real MediaWiki #expr's own "=" (equality) to Python's "==",
+# but ONLY a standalone "=" -- not one that's already part of a real,
+# multi-character comparison operator (<=, >=, ==, !=). A naive
+# re.sub('=', '==', expr) doubles every "=" indiscriminately, which
+# mangles all four of those into invalid Python syntax: "<=" becomes
+# "<==", ">=" becomes ">==", "==" becomes "====", "!=" becomes "!==" --
+# confirmed directly, all four failed to parse at all before this fix,
+# while the two single-character comparisons (<, >) worked fine, which
+# is what first made the "=" substitution the suspect. Real-world
+# impact confirmed to be substantial, not theoretical: a single real
+# article (pulling in citation/CS1 and Wikidata module machinery, both
+# of which lean on #expr comparisons heavily for their own internal
+# logic) hit this thousands of times in one page.
+# (?<![<>=!]) -- the "=" isn't preceded by one of those (i.e. it's not
+#   the second character of an existing two-character operator).
+# (?!=) -- the "=" isn't followed by another "=" (i.e. it's not the
+#   first character of an existing "==").
+_EQUALS_TO_DOUBLE_EQUALS_RE = re.compile(r'(?<![<>=!])=(?!=)')
+
+
 def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
     try:
         orig_expr = expr
-        expr = re.sub('=', '==', expr)
+        expr = _EQUALS_TO_DOUBLE_EQUALS_RE.sub('==', expr)
         expr = re.sub(r'\bmod\b', '%', expr)
         expr = re.sub(r'\bdiv\b', '/', expr)
         expr = re.sub(r'\bround\b', '|ROUND|', expr)
