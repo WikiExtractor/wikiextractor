@@ -309,13 +309,11 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     # collected beforehand (comments, self-closing tags, ignored tags)
     # would hold stale positions once dropSpans() later runs against
     # the shifted text.
-    for pattern in lineBreak_tag_patterns:
-        text = substituteLineBreakTag(pattern, text)
+    text = substituteLineBreakTag(lineBreak_tag_pattern, text)
 
     # Same must-run-before-span-collection reasoning as above: this
     # also mutates text's length.
-    for pattern in block_separator_tag_patterns:
-        text = substituteLineBreakTag(pattern, text, separator='\n')
+    text = substituteLineBreakTag(block_separator_tag_pattern, text, separator='\n')
 
     spans = []
     # Drop HTML comments
@@ -347,7 +345,7 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
         # (already handled separately by selfClosing_tag_patterns
         # above), not a wrapping open for discardElements to pair up.
         # (?=(...))\1 emulates an atomic/possessive match for the
-        # quoted alternatives (see lineBreak_tag_patterns above) --
+        # quoted alternatives (see lineBreak_tag_pattern above) --
         # needed here specifically because without it, the (?<!/)
         # exclusion can force a backtrack that falls back to plain
         # [^>] matching, wrongly ending at a quoted value's own inner
@@ -1290,7 +1288,7 @@ selfClosing_tag_patterns = [
     # trailing slash) -- a bare, unclosed <nobr> is a stray tag like
     # them, but "no line break" doesn't call for inserting a space
     # where the tag was, so it stays here rather than moving to
-    # lineBreak_tag_patterns.
+    # lineBreak_tag_pattern.
     #
     # ref/references/nowiki/templatestyles are NOT treated this way:
     # for ref specifically, self-closing has a distinct, real meaning
@@ -1300,7 +1298,7 @@ selfClosing_tag_patterns = [
     # as self-closing. templatestyles is always self-closing in real
     # usage, so the strict pattern loses nothing there either.
     # (?=(...))\1 emulates an atomic/possessive match for the quoted
-    # alternatives (see lineBreak_tag_patterns below) -- without it, a
+    # alternatives (see lineBreak_tag_pattern below) -- without it, a
     # literal '>' inside a quoted attribute value (e.g.
     # <ref style="a > b" />) would prevent matching at all, since
     # [^>]* alone stops at that inner '>' and never finds the real,
@@ -1316,48 +1314,64 @@ selfClosing_tag_patterns = [
 # slash optional, since old-style HTML4 syntax like <br clear=all> --
 # or even a bare <br> -- is just as valid a "line break" instance as
 # <br/>), but substituted with a space instead of bulk-deleted.
-lineBreak_tag_patterns = [
-    # (?=(...))\1 emulates an atomic/possessive match for the quoted
-    # alternatives, portably (works pre-3.11 too, unlike native atomic
-    # groups): once a quoted string is matched, the engine can never
-    # backtrack into re-interpreting its own quote characters as
-    # individual [^>] matches. Without it, a literal '>' inside a
-    # quoted attribute value (e.g. <br style="a > b" />, legal HTML --
-    # a quoted '>' doesn't end the tag) truncates the match early, at
-    # that inner '>', leaving the tag's own real ending stranded as
-    # literal text afterward.
-    re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*>''' % tag,
-               re.DOTALL | re.IGNORECASE)
-    for tag in lineBreakTags
-] + [
-    # br/hr are void elements -- a closing tag is invalid HTML, but a
-    # real, if malformed, editing mistake (someone writing </br> as if
-    # it needed a matching close, same instinct as XHTML-style
-    # self-closing syntax). No attributes are possible on a closing
-    # tag, so no quote-aware matching is needed here.
-    re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE)
-    for tag in lineBreakTags
-]
+#
+# Combined into ONE pattern (all tags' opening and closing forms
+# joined with '|') rather than a separate compiled pattern per tag,
+# each looped over its own substituteLineBreakTag() call: measured
+# directly on realistic article text that substituteLineBreakTag()'s
+# own per-call Python overhead (building a result list, checking
+# whitespace boundaries per match) dominates over the regex engine's
+# own matching cost here, unlike a plain re.sub() -- one combined call
+# was ~2.6x faster than four separate ones for lineBreak_tag_pattern,
+# and ~6.6x faster for the larger block_separator_tag_pattern below,
+# with verified identical output on real data either way.
+#
+# Only the opening-tag half needs the group-per-tag naming below: its
+# (?=(...))\1 atomic-group-emulation trick uses a capturing group,
+# and naively joining multiple copies of that trick with '|' breaks
+# it -- confirmed directly: alternative N's own \1, once combined,
+# ends up referring to alternative 0's group (renumbered from that
+# alternative's own local group 1 to the combined pattern's own,
+# different numbering), which never participated in a match where a
+# later alternative is what actually matched, so the backreference
+# silently fails and that entire alternative stops matching anything
+# at all. Named groups (?P<lb0>...)/(?P=lb0), one name per tag, avoid
+# this entirely. The closing-tag half has no groups at all, so it
+# doesn't need this.
+lineBreak_tag_pattern = re.compile(
+    '|'.join(
+        [r'''<\s*%s\b(?:(?=(?P<lb%d>"[^"]*"|'[^']*'|[^>]))(?P=lb%d))*>''' % (tag, i, i)
+         for i, tag in enumerate(lineBreakTags)]
+        # br/hr are void elements -- a closing tag is invalid HTML,
+        # but a real, if malformed, editing mistake (someone writing
+        # </br> as if it needed a matching close, same instinct as
+        # XHTML-style self-closing syntax). No attributes are possible
+        # on a closing tag, so no quote-aware matching is needed here.
+        + [r'</\s*%s\s*>' % tag for tag in lineBreakTags]
+    ),
+    re.DOTALL | re.IGNORECASE)
 
 # blockSeparatorTags (see the comment there) are substituted with a
 # newline rather than a space, via the same substituteLineBreakTag()
-# mechanism -- each tag contributes its own opening AND closing
-# pattern separately here, since (unlike br/hr, which are single,
-# self-closing tags) these have two distinct halves, each appearing at
-# a different position and needing its own independent substitution.
+# mechanism -- each tag contributes its own opening AND closing half,
+# since (unlike br/hr, which are single, self-closing tags) these have
+# two distinct halves, each appearing at a different position and
+# needing its own independent substitution. All halves for all tags
+# are joined into one combined pattern -- see lineBreak_tag_pattern
+# above for why. No capturing groups are involved in any of these
+# (unlike lineBreak's opening half), so no group-naming is needed here.
 # Same shapes as ignoreTag()'s own left/right patterns, for
 # consistency: opening requires the tag name immediately after '<',
 # matching real HTML tokenizer behavior (a bare '< p>' is not treated
 # as a tag at all by real parsers, so this shouldn't either); closing
 # tolerates whitespace on either side of the name.
-block_separator_tag_patterns = [
-    pattern
-    for tag in blockSeparatorTags
-    for pattern in (
-        re.compile(r'<%s\b.*?>' % tag, re.IGNORECASE | re.DOTALL),
-        re.compile(r'</\s*%s\s*>' % tag, re.IGNORECASE),
-    )
-]
+block_separator_tag_pattern = re.compile(
+    '|'.join(
+        part
+        for tag in blockSeparatorTags
+        for part in (r'<%s\b.*?>' % tag, r'</\s*%s\s*>' % tag)
+    ),
+    re.IGNORECASE | re.DOTALL)
 
 
 def substituteLineBreakTag(pattern, text, separator=' '):

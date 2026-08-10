@@ -1,5 +1,5 @@
 """
-Tests for the </br> and </hr> closing-tag fix in lineBreak_tag_patterns.
+Tests for the </br> and </hr> closing-tag fix in lineBreak_tag_pattern.
 
 br and hr are void HTML elements -- they never take a closing tag on
 a well-formed page. But real wikitext sometimes has one anyway (a
@@ -18,7 +18,7 @@ word-merging fix in clean()): simply deleting it would fuse the two
 sentences together with nothing between them.
 
 Fixed by adding a second, closing-tag pattern per lineBreakTags entry
-(br, hr) to the same lineBreak_tag_patterns list, using the same
+(br, hr) to the same lineBreak_tag_pattern list, using the same
 space-substitution mechanism as the opening-tag form -- no attributes
 are possible on a closing tag, so the quote-aware matching the opening
 pattern needs doesn't apply here.

@@ -1,5 +1,5 @@
 """
-Tests for quote-aware tag matching in extract.py (lineBreak_tag_patterns,
+Tests for quote-aware tag matching in extract.py (lineBreak_tag_pattern,
 selfClosing_tag_patterns, and discardElements' opening pattern).
 
 A literal '>' inside a quoted attribute value is legal HTML -- e.g.
@@ -63,7 +63,7 @@ class QuoteAwareTagMatchingTestCase(unittest.TestCase):
 
 
 class LineBreakTagQuoteAwarenessTests(QuoteAwareTagMatchingTestCase):
-    """lineBreak_tag_patterns (br/hr) -- the exact case reported."""
+    """lineBreak_tag_pattern (br/hr) -- the exact case reported."""
 
     def test_quoted_greater_than_with_self_closing_slash(self):
         text = 'word<br style="a > b" />word'

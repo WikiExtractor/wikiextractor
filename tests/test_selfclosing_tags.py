@@ -2,7 +2,7 @@
 Tests for self-closing/void-element tag handling in extract.py:
 br, hr, nobr, ref, references, nowiki, templatestyles. All of these
 share the same underlying mechanism (selfClosingTags/lineBreakTags,
-selfClosing_tag_patterns/lineBreak_tag_patterns, and the shared
+selfClosing_tag_patterns/lineBreak_tag_pattern, and the shared
 tag-processing loop in clean()), which is why they're tested together
 here rather than split across files -- a change to that shared
 mechanism (as several of the fixes below were) has to be checked
@@ -258,11 +258,11 @@ class LineBoundaryTests(VoidElementTestCase):
         # must count as a boundary too -- otherwise this function can
         # produce a double space on its own, relying on some other,
         # unrelated part of the pipeline to clean it up afterward.
-        result = ex.substituteLineBreakTag(ex.lineBreak_tag_patterns[0], "text <br>more")
+        result = ex.substituteLineBreakTag(ex.lineBreak_tag_pattern, "text <br>more")
         self.assertEqual(result, "text more")
 
     def test_existing_single_space_after_tag_no_double_space(self):
-        result = ex.substituteLineBreakTag(ex.lineBreak_tag_patterns[0], "text<br> more")
+        result = ex.substituteLineBreakTag(ex.lineBreak_tag_pattern, "text<br> more")
         self.assertEqual(result, "text more")
 
 
