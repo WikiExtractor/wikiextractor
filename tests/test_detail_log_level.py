@@ -64,14 +64,20 @@ class DetailLevelFilteringTests(unittest.TestCase):
         # WikiExtractor.py).
         extract_logger = logging.getLogger('wikiextractor.extract')
         original_level = extract_logger.level
+        original_propagate = extract_logger.propagate
         extract_logger.addHandler(handler)
         extract_logger.setLevel(level)
+        # Capture only: with propagate left on, a handler that another
+        # test file put on an ancestor logger also renders every record
+        # produced here, to stderr.
+        extract_logger.propagate = False
         try:
             out = StringIO()
             extractor.extract(out, html_safe=True)
         finally:
             extract_logger.removeHandler(handler)
             extract_logger.setLevel(original_level)
+            extract_logger.propagate = original_propagate
         return log_stream.getvalue()
 
     def test_not_shown_at_default_info_level(self):
@@ -99,13 +105,16 @@ class DetailLevelFilteringTests(unittest.TestCase):
         handler = logging.StreamHandler(log_stream)
         extract_logger = logging.getLogger('wikiextractor.extract')
         original_level = extract_logger.level
+        original_propagate = extract_logger.propagate
         extract_logger.addHandler(handler)
         extract_logger.setLevel(ex.DETAIL)
+        extract_logger.propagate = False
         try:
             extractor.clean_text('{{Simple}}', expand_templates=True)
         finally:
             extract_logger.removeHandler(handler)
             extract_logger.setLevel(original_level)
+            extract_logger.propagate = original_propagate
         log_output = log_stream.getvalue()
         self.assertNotIn("INVOCATION", log_output)
         self.assertNotIn("TITLE", log_output)

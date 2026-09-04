@@ -22,6 +22,14 @@ level by default while remaining independently overridable
 (logging.getLogger('wikiextractor.extract').setLevel(...) still
 works, same as it always did for any Python logger hierarchy).
 
+Both configure functions install a handler and set propagate=False on
+their own logger, and both outlive the test that called them. A
+handler left on 'wikiextractor' prints every record that later tests
+propagate up to it, which is thousands of lines of INVOCATION/TITLE
+tracing from the files that raise 'wikiextractor.extract' to DEBUG to
+capture it. NamedLoggerStateMixin below snapshots level, handlers and
+propagate for all three loggers so nothing survives the test.
+
 Run with:
     python -m unittest tests.test_logging_architecture -v
 or, from the tests/ directory:
@@ -37,10 +45,44 @@ sys.path.insert(0, '..')  # allow running directly from tests/ without installin
 import wikiextractor.WikiExtractor as we
 
 
-class RootLoggerUntouchedTests(unittest.TestCase):
+WIKIEXTRACTOR_LOGGERS = ('wikiextractor', 'wikiextractor.extract',
+                          'wikiextractor.mapreduce')
+
+
+class NamedLoggerStateMixin:
+    """Restores the three named loggers to the state they were in
+    before the test: level, handlers and propagate flag.
+
+    Handlers matter as much as levels here. Both configure functions
+    add a StreamHandler to stderr, and one left behind on
+    'wikiextractor' renders anything a later test propagates up to it
+    from 'wikiextractor.extract' -- see this file's own module
+    docstring.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._logger_state = {}
+        for name in WIKIEXTRACTOR_LOGGERS:
+            logger = logging.getLogger(name)
+            self._logger_state[name] = (logger.level, list(logger.handlers),
+                                         logger.propagate)
+
+    def tearDown(self):
+        for name in WIKIEXTRACTOR_LOGGERS:
+            logger = logging.getLogger(name)
+            level, handlers, propagate = self._logger_state[name]
+            logger.setLevel(level)
+            logger.handlers = handlers
+            logger.propagate = propagate
+        super().tearDown()
+
+
+class RootLoggerUntouchedTests(NamedLoggerStateMixin, unittest.TestCase):
     """The actual property this architecture exists to guarantee."""
 
     def setUp(self):
+        super().setUp()
         self.root_logger = logging.getLogger()
         self.original_level = self.root_logger.level
         self.original_handlers = list(self.root_logger.handlers)
@@ -48,6 +90,7 @@ class RootLoggerUntouchedTests(unittest.TestCase):
     def tearDown(self):
         self.root_logger.setLevel(self.original_level)
         self.root_logger.handlers = self.original_handlers
+        super().tearDown()
 
     def test_configure_wikiextractor_logging_does_not_change_root_level(self):
         we.configure_wikiextractor_logging(logging.DEBUG)
@@ -63,18 +106,16 @@ class RootLoggerUntouchedTests(unittest.TestCase):
         self.assertEqual(self.root_logger.handlers, self.original_handlers)
 
 
-class NamedLoggersIndependentlyConfigurableTests(unittest.TestCase):
+class NamedLoggersIndependentlyConfigurableTests(NamedLoggerStateMixin,
+                                                 unittest.TestCase):
     """The actual point of naming them: a programmatic caller can set
     each one's level separately.
-    """
 
-    def tearDown(self):
-        # These tests deliberately set explicit levels on the named
-        # loggers -- reset to NOTSET (0) afterward so later tests in
-        # the suite see the same default, unconfigured state they'd
-        # see if this file hadn't run yet.
-        for name in ('wikiextractor', 'wikiextractor.extract', 'wikiextractor.mapreduce'):
-            logging.getLogger(name).setLevel(logging.NOTSET)
+    These tests deliberately configure the named loggers; the mixin
+    puts level, handlers and propagate back afterward, so later tests
+    in the suite see the same unconfigured state they would if this
+    file had not run.
+    """
 
     def test_wikiextractor_logger_is_named_correctly(self):
         self.assertEqual(we.wikiextractor_logger.name, 'wikiextractor')

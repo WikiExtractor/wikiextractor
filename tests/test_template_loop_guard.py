@@ -91,13 +91,19 @@ class TemplateLoopGuardTestCase(unittest.TestCase):
         handler = logging.StreamHandler(log_stream)
         extract_logger = logging.getLogger('wikiextractor.extract')
         original_level = extract_logger.level
+        original_propagate = extract_logger.propagate
         extract_logger.addHandler(handler)
         extract_logger.setLevel(level)
+        # Capture only: with propagate left on, a handler that another
+        # test file put on an ancestor logger also renders every record
+        # produced here, to stderr.
+        extract_logger.propagate = False
         try:
             yield log_stream
         finally:
             extract_logger.removeHandler(handler)
             extract_logger.setLevel(original_level)
+            extract_logger.propagate = original_propagate
 
 
 class LegitimateSelfRecursionTests(TemplateLoopGuardTestCase):
