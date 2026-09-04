@@ -1953,7 +1953,11 @@ class Extractor():
         if colon > 1:
             funct = title[:colon]
             parts[0] = title[colon + 1:].strip()  # side-effect (parts[0] not used later)
-            # arguments after first are not evaluated
+            if funct not in lazyParserFunctions:
+                # Value functions receive fully expanded arguments.
+                # parts[0] arrives expanded already, as part of title;
+                # the rest are expanded here, before the call.
+                parts = [parts[0]] + [self.expandTemplates(p) for p in parts[1:]]
             ret = callParserFunction(funct, parts, self.frame,
                                       page_title=self.title, page_id=self.id, extractor=self)
             return self.expandTemplates(ret)
@@ -3067,6 +3071,32 @@ def sharp_invoke(module, function, frame):
                 return funct()
     return ''
 
+
+# Parser functions that expand their arguments lazily, rather than all
+# up front. The branching functions choose one of their arguments and
+# discard the others, so only the part that decides the branch is
+# expanded eagerly (that is parts[0], expanded as part of the title in
+# expandTemplate()); whichever branch is selected is expanded
+# afterwards, by the expandTemplates() call applied to the return
+# value. Expanding every branch up front would do the work of every
+# arm of a large #switch to keep one, and would run expansions the
+# page never asked for.
+#
+# '#invoke' is here for a different reason: sharp_invoke() takes the
+# module and function names as written, along with the frame.
+#
+# Everything else in parserFunctions below is a value function --
+# padleft, lc, #sub, formatnum and the rest -- which MediaWiki invokes
+# with every argument already expanded.
+lazyParserFunctions = {
+    '#if',
+    '#ifeq',
+    '#iferror',
+    '#ifexist',
+    '#ifexpr',
+    '#switch',
+    '#invoke',
+}
 
 parserFunctions = {
 
