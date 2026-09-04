@@ -212,6 +212,15 @@ discardElements = [
     # above. Confirmed leaking through verbatim (also HTML-escaped) on
     # a real pnb.wikipedia.org page (id 40471).
     'categorytree',
+    # The reading half of an East Asian ruby annotation (furigana):
+    # rt holds the reading, rtc a second one, and rp the parentheses a
+    # renderer without ruby support falls back to. The base text they
+    # annotate is kept -- ruby and rb are in ignoredTags -- so
+    # "加藤{{ruby|由美|よしみ}}" extracts as "加藤由美". Keeping the
+    # reading would splice a second spelling of the same word into the
+    # running text, and ruby markup that omits rp (most of it) would
+    # fuse base and reading with nothing between them.
+    'rp', 'rt', 'rtc',
 ]
 
 ##
@@ -1186,7 +1195,12 @@ blockSeparatorTags = ('p', 'center', 'h1', 'h2', 'h3', 'h4')
 ignoredTags = (
     'abbr', 'b', 'bdi', 'big', 'blockquote', 'cite', 'div', 'em',
     'font', 'hiero', 'i', 'kbd', 'nowiki',
-    'plaintext', 'poem', 's', 'section', 'span', 'strike', 'strong',
+    'plaintext', 'poem',
+    # ruby wraps an East Asian ruby annotation and rb the base text
+    # inside it; the reading is discarded separately (see
+    # discardElements).
+    'rb', 'ruby',
+    's', 'section', 'span', 'strike', 'strong',
     'sub', 'sup', 'tt', 'u', 'var'
 )
 
