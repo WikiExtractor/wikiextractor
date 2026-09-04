@@ -19,6 +19,8 @@
 # =============================================================================
 
 import re
+import calendar
+import datetime
 import html
 import json
 import ast
@@ -2813,6 +2815,173 @@ def sharp_switch(primary, *params, expand=None):
     return ''
 
 
+
+# ----------------------------------------------------------------------
+# {{#time: FORMAT | TIMESTAMP }}
+
+# Format characters sharp_time() renders, all of them numeric. The
+# ones left out -- month and day names (F, M, D, l), the composite
+# r/c formats, the xg/xn-prefixed non-Gregorian calendars -- need the
+# source wiki's own language data, which nothing here tracks: jawiki's
+# "F" is 3月 where enwiki's is March. A format string containing any
+# alphabetic character outside this table is declined (see
+# sharp_time()), so a wrong month name is never produced.
+_TIME_FORMATTERS = {
+    'Y': lambda t: '%04d' % t.year,
+    'y': lambda t: '%02d' % (t.year % 100),
+    'L': lambda t: '1' if calendar.isleap(t.year) else '0',
+    'n': lambda t: str(t.month),
+    'm': lambda t: '%02d' % t.month,
+    't': lambda t: str(calendar.monthrange(t.year, t.month)[1]),
+    'j': lambda t: str(t.day),
+    'd': lambda t: '%02d' % t.day,
+    'z': lambda t: str(t.timetuple().tm_yday - 1),
+    'N': lambda t: str(t.isoweekday()),
+    'w': lambda t: str(t.isoweekday() % 7),
+    'W': lambda t: '%02d' % t.isocalendar()[1],
+    'G': lambda t: str(t.hour),
+    'H': lambda t: '%02d' % t.hour,
+    'g': lambda t: str((t.hour % 12) or 12),
+    'h': lambda t: '%02d' % ((t.hour % 12) or 12),
+    'i': lambda t: '%02d' % t.minute,
+    's': lambda t: '%02d' % t.second,
+    'U': lambda t: str(int(t.timestamp())),
+}
+
+# Timestamp forms sharp_time() accepts. Real MediaWiki hands the
+# timestamp to PHP's strtotime, which takes a far wider and looser
+# range of English date expressions than these; the forms here are the
+# ones citation and date-validation templates actually pass. Anything
+# else is reported as an invalid time.
+_TIME_ISO_RE = re.compile(r"""
+    ^\s*
+    (?P<year>\d{1,4})
+    (?:-(?P<month>\d{1,2})
+       (?:-(?P<day>\d{1,2}))?
+    )?
+    (?:[ T]
+       (?P<hour>\d{1,2}):(?P<minute>\d{2})
+       (?::(?P<second>\d{2}))?
+    )?
+    Z?
+    \s*$
+""", re.VERBOSE)
+
+# The 14-digit form MediaWiki stores revision timestamps in.
+_TIME_MW_RE = re.compile(r'^\s*(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*$')
+
+# A single offset from the current time, e.g. "+24hours" -- what
+# citation templates use to decide whether an access date is in the
+# future. Only units timedelta represents exactly are here: a "+1
+# month" offset has no fixed length, and guessing one would put a
+# silently wrong date into a comparison.
+_TIME_RELATIVE_RE = re.compile(
+    r'^\s*([+-]?\d+)\s*(second|minute|hour|day|week)s?\s*$', re.IGNORECASE)
+
+_TIME_RELATIVE_UNITS = {
+    'second': 1, 'minute': 60, 'hour': 3600, 'day': 86400, 'week': 604800,
+}
+
+
+def _parseTimestamp(timestamp):
+    """Return a timezone-aware datetime for a #time timestamp, or None
+    when it is not one of the accepted forms.
+
+    An empty timestamp means now, as it does in MediaWiki. That and
+    the relative form make the result depend on when extraction runs,
+    which is also true of the real parser function; a run that needs
+    to be reproducible byte for byte should keep that in mind.
+    """
+    timestamp = timestamp.strip()
+    if not timestamp:
+        return datetime.datetime.now(datetime.timezone.utc)
+
+    relative = _TIME_RELATIVE_RE.match(timestamp)
+    if relative:
+        amount = int(relative.group(1))
+        seconds = amount * _TIME_RELATIVE_UNITS[relative.group(2).lower()]
+        return (datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(seconds=seconds))
+
+    mediawiki = _TIME_MW_RE.match(timestamp)
+    if mediawiki:
+        parts = [int(p) for p in mediawiki.groups()]
+        try:
+            return datetime.datetime(*parts, tzinfo=datetime.timezone.utc)
+        except ValueError:
+            return None
+
+    iso = _TIME_ISO_RE.match(timestamp)
+    if not iso:
+        return None
+    fields = iso.groupdict()
+    try:
+        return datetime.datetime(
+            int(fields['year']),
+            int(fields['month'] or 1),
+            int(fields['day'] or 1),
+            int(fields['hour'] or 0),
+            int(fields['minute'] or 0),
+            int(fields['second'] or 0),
+            tzinfo=datetime.timezone.utc,
+        )
+    except ValueError:
+        # Well-formed but not a real date -- 2024-02-31, month 13.
+        return None
+
+
+def sharp_time(format_string, timestamp='', *args):
+    """{{#time: FORMAT | TIMESTAMP }} -- render a date.
+
+    Two results other than a formatted date are possible, and they
+    mean different things. An unparseable timestamp gives the error
+    span, which is what {{#iferror:}} tests for and what date-checking
+    templates rely on to reject a malformed date. A format string
+    asking for something outside _TIME_FORMATTERS gives the empty
+    string, leaving the caller in the same position as before this
+    function rendered anything at all rather than claiming the date
+    itself was bad.
+
+    The language and local-time arguments MediaWiki takes after the
+    timestamp are ignored: output here is Gregorian and UTC.
+    """
+    parsed = _parseTimestamp(timestamp)
+    if parsed is None:
+        return _SHARP_EXPR_ERROR_SPAN
+
+    out = []
+    index = 0
+    while index < len(format_string):
+        char = format_string[index]
+        if char == '\\':
+            # Escapes the next character, which is then a literal.
+            if index + 1 < len(format_string):
+                out.append(format_string[index + 1])
+                index += 2
+                continue
+            index += 1
+            continue
+        if char == '"':
+            closing = format_string.find('"', index + 1)
+            if closing == -1:
+                # No closing quote: the quote is itself a literal.
+                out.append(char)
+                index += 1
+                continue
+            out.append(format_string[index + 1:closing])
+            index = closing + 1
+            continue
+        if char in _TIME_FORMATTERS:
+            out.append(_TIME_FORMATTERS[char](parsed))
+            index += 1
+            continue
+        if char.isalpha():
+            return ''
+        out.append(char)
+        index += 1
+    return ''.join(out)
+
+
 # Digit sets used by some wikis for "national digit" display, mapped
 # back to plain ASCII for formatnum's reverse (|R) mode. Each mapping
 # is a fixed, one-to-one character substitution with no locale
@@ -3163,9 +3332,12 @@ parserFunctions = {
 
     '# language': lambda *args: '',  # not supported
 
-    '#time': lambda *args: '',  # not supported
+    '#time': sharp_time,
 
-    '#timel': lambda *args: '',  # not supported
+    # Local time, which would need the source wiki's own configured
+    # timezone; sharp_time() works in UTC, which is what MediaWiki
+    # stores timestamps in and what #time itself uses.
+    '#timel': sharp_time,
 
     '#titleparts': lambda *args: '',  # not supported
 
