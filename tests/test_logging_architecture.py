@@ -28,7 +28,16 @@ handler left on 'wikiextractor' prints every record that later tests
 propagate up to it, which is thousands of lines of INVOCATION/TITLE
 tracing from the files that raise 'wikiextractor.extract' to DEBUG to
 capture it. NamedLoggerStateMixin below snapshots level, handlers and
-propagate for all three loggers so nothing survives the test.
+propagate for every logger in wikiextractor's namespace so nothing
+survives the test.
+
+Which loggers those are is discovered from logging's own registry at
+the time each test runs, via wikiextractor_loggers() below, rather
+than written down here -- a fourth named logger added later is covered
+without this file being touched, and a name change to an existing one
+cannot leave a stale entry behind that quietly stops being restored.
+The namespace root itself comes from wikiextractor_logger.name, so
+even renaming that is picked up.
 
 Run with:
     python -m unittest tests.test_logging_architecture -v
@@ -45,12 +54,35 @@ sys.path.insert(0, '..')  # allow running directly from tests/ without installin
 import wikiextractor.WikiExtractor as we
 
 
-WIKIEXTRACTOR_LOGGERS = ('wikiextractor', 'wikiextractor.extract',
-                          'wikiextractor.mapreduce')
+def wikiextractor_loggers():
+    """Every logger currently registered under wikiextractor's own
+    namespace, the top-level one included.
+
+    Read out of logging's registry rather than listed, so this keeps
+    working as the namespace grows or its members are renamed. The
+    root of the namespace comes from wikiextractor_logger itself, not
+    from a literal here.
+
+    Two details of the registry to work around. It also holds
+    PlaceHolder objects, standing in for names that only exist as an
+    ancestor of some real logger ('wikiextractor.a' when only
+    'wikiextractor.a.b' was ever requested); those carry no level,
+    handlers or propagate flag, and calling getLogger() on such a name
+    would turn it into a real logger, which is itself a state change.
+    They are filtered out by type. And the registry can gain entries
+    while it is being read, so it is copied to a list first.
+    """
+    root = we.wikiextractor_logger.name
+    prefix = root + '.'
+    registry = list(logging.Logger.manager.loggerDict.items())
+    return [we.wikiextractor_logger] + [
+        logger for name, logger in registry
+        if name.startswith(prefix) and isinstance(logger, logging.Logger)
+    ]
 
 
 class NamedLoggerStateMixin:
-    """Restores the three named loggers to the state they were in
+    """Restores wikiextractor's loggers to the state they were in
     before the test: level, handlers and propagate flag.
 
     Handlers matter as much as levels here. Both configure functions
@@ -62,16 +94,23 @@ class NamedLoggerStateMixin:
 
     def setUp(self):
         super().setUp()
-        self._logger_state = {}
-        for name in WIKIEXTRACTOR_LOGGERS:
-            logger = logging.getLogger(name)
-            self._logger_state[name] = (logger.level, list(logger.handlers),
-                                         logger.propagate)
+        self._logger_state = {
+            logger.name: (logger.level, list(logger.handlers), logger.propagate)
+            for logger in wikiextractor_loggers()
+        }
 
     def tearDown(self):
-        for name in WIKIEXTRACTOR_LOGGERS:
-            logger = logging.getLogger(name)
-            level, handlers, propagate = self._logger_state[name]
+        for logger in wikiextractor_loggers():
+            saved = self._logger_state.get(logger.name)
+            if saved is None:
+                # Registered during the test. There is no earlier
+                # state to put back, so it gets the state a logger has
+                # when it is first created.
+                logger.setLevel(logging.NOTSET)
+                logger.handlers = []
+                logger.propagate = True
+                continue
+            level, handlers, propagate = saved
             logger.setLevel(level)
             logger.handlers = handlers
             logger.propagate = propagate
@@ -144,6 +183,124 @@ class NamedLoggersIndependentlyConfigurableTests(NamedLoggerStateMixin,
         we.configure_mapreduce_logging(True)  # -> DEBUG
         self.assertEqual(we.wikiextractor_logger.getEffectiveLevel(), logging.ERROR)
         self.assertEqual(we.mapreduce_logger.getEffectiveLevel(), logging.DEBUG)
+
+
+class LoggerDiscoveryTests(NamedLoggerStateMixin, unittest.TestCase):
+    """wikiextractor_loggers() is what keeps this file from going
+    stale, so it gets its own coverage."""
+
+    def setUp(self):
+        super().setUp()
+        self._registered = []
+
+    def tearDown(self):
+        # Loggers are never removed from the registry by logging
+        # itself, so the ones created here are taken back out --
+        # otherwise they stay visible to every later test in the
+        # process under a wikiextractor.* name that means nothing.
+        for name in self._registered:
+            logging.Logger.manager.loggerDict.pop(name, None)
+        super().tearDown()
+
+    def register(self, name):
+        self._registered.append(name)
+        return logging.getLogger(name)
+
+    def names(self):
+        return {logger.name for logger in wikiextractor_loggers()}
+
+    def test_the_known_loggers_are_found(self):
+        self.assertLessEqual({'wikiextractor', 'wikiextractor.extract',
+                              'wikiextractor.mapreduce'},
+                             self.names())
+
+    def test_the_namespace_root_itself_is_included(self):
+        self.assertIn(we.wikiextractor_logger.name, self.names())
+
+    def test_a_logger_added_later_is_found_without_listing_it(self):
+        self.register('wikiextractor.newly_added')
+        self.assertIn('wikiextractor.newly_added', self.names())
+
+    def test_a_deeper_child_is_found(self):
+        self.register('wikiextractor.extract.templates')
+        self.assertIn('wikiextractor.extract.templates', self.names())
+
+    def test_placeholder_ancestors_are_skipped(self):
+        # Requesting a.b.c registers PlaceHolder entries for
+        # 'wikiextractor.a' and 'wikiextractor.a.b'. Those have no
+        # state to save, and asking for them by name would make them
+        # real.
+        self.register('wikiextractor.a.b.c')
+        self._registered.extend(['wikiextractor.a', 'wikiextractor.a.b'])
+        found = self.names()
+        self.assertIn('wikiextractor.a.b.c', found)
+        self.assertNotIn('wikiextractor.a', found)
+        self.assertNotIn('wikiextractor.a.b', found)
+
+    def test_loggers_outside_the_namespace_are_left_alone(self):
+        self.register('wikiextractorish')  # shares a prefix, not the namespace
+        self.register('something.else')
+        found = self.names()
+        self.assertNotIn('wikiextractorish', found)
+        self.assertNotIn('something.else', found)
+
+    def test_everything_returned_is_a_real_logger(self):
+        for logger in wikiextractor_loggers():
+            with self.subTest(logger=logger):
+                self.assertIsInstance(logger, logging.Logger)
+
+
+class LoggerStateRestorationTests(unittest.TestCase):
+    """The mixin's own behavior, exercised through a throwaway test
+    case rather than by trusting the other classes here."""
+
+    class Probe(NamedLoggerStateMixin, unittest.TestCase):
+        def runTest(self):
+            pass
+
+    def run_probe(self, body):
+        probe = self.Probe()
+        probe.setUp()
+        try:
+            body()
+        finally:
+            probe.tearDown()
+
+    def test_a_handler_added_during_the_test_is_removed(self):
+        logger = logging.getLogger('wikiextractor')
+        before = list(logger.handlers)
+        self.run_probe(lambda: we.configure_wikiextractor_logging(logging.DEBUG))
+        self.assertEqual(logger.handlers, before)
+
+    def test_a_level_set_during_the_test_is_restored(self):
+        logger = logging.getLogger('wikiextractor.extract')
+        before = logger.level
+        self.run_probe(lambda: logger.setLevel(logging.DEBUG))
+        self.assertEqual(logger.level, before)
+
+    def test_propagate_set_during_the_test_is_restored(self):
+        logger = logging.getLogger('wikiextractor')
+        before = logger.propagate
+        self.run_probe(lambda: we.configure_wikiextractor_logging(logging.DEBUG))
+        self.assertEqual(logger.propagate, before)
+
+    def test_a_logger_created_during_the_test_is_left_unconfigured(self):
+        name = 'wikiextractor.created_midtest'
+
+        def body():
+            logger = logging.getLogger(name)
+            logger.setLevel(logging.DEBUG)
+            logger.addHandler(logging.StreamHandler())
+            logger.propagate = False
+
+        try:
+            self.run_probe(body)
+            logger = logging.getLogger(name)
+            self.assertEqual(logger.level, logging.NOTSET)
+            self.assertEqual(logger.handlers, [])
+            self.assertTrue(logger.propagate)
+        finally:
+            logging.Logger.manager.loggerDict.pop(name, None)
 
 
 if __name__ == '__main__':
