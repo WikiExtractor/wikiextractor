@@ -21,6 +21,15 @@ For those, expanding the return value afterwards is too late, because
 the function has already consumed whatever it was given. So all of
 their arguments are expanded before the call.
 
+Two of the lazy functions are only lazy about their results. #ifeq and
+#switch also have comparison operands -- #ifeq's rvalue, and every
+#switch case label -- which are data in the same way a value
+function's arguments are, and which MediaWiki expands. Those are
+expanded with the Extractor's own expandTemplates, which
+callParserFunction() binds from the extractor it is given, on demand
+as the scan reaches them -- so a #switch that matches its second case
+never expands the labels of the twenty after it.
+
 The regression this file pins down came from that second group. A real
 jawiki chain ({{citation needed}} -> Template:要出典 ->
 Template:Fix -> Template:要出典/dateHandler) passes a computed year to
@@ -220,6 +229,167 @@ class DateHandlerChainRegressionTests(unittest.TestCase):
         self.assertIn('quarterly', result)
         self.assertNotIn('{{', result)
         self.assertNotIn('#switch', result)
+
+
+class ComparisonOperandExpansionTests(unittest.TestCase):
+    """#ifeq's rvalue and #switch's case labels decide the comparison,
+    so they are expanded even though the branches around them are
+    not."""
+
+    def test_ifeq_rvalue_containing_a_template_compares_by_value(self):
+        templates = {'Template:B': 'b'}
+        self.assertEqual(expand('{{#ifeq:b|{{B}}|same|different}}', templates), 'same')
+
+    def test_ifeq_rvalue_that_does_not_match_takes_the_false_branch(self):
+        templates = {'Template:B': 'b'}
+        self.assertEqual(expand('{{#ifeq:z|{{B}}|same|different}}', templates), 'different')
+
+    def test_ifeq_compares_two_parser_function_results(self):
+        # The Fix/title shape: padleft on both sides, one of them
+        # reached through a template.
+        templates = {'Template:Pad': '{{padleft:|15|X}}'}
+        self.assertEqual(
+            expand('{{#ifeq:{{padleft:|15|X}}|{{Pad}}|same|different}}', templates),
+            'same')
+
+    def test_ifeq_branches_are_still_lazy(self):
+        templates = RecordingTemplates({'Template:B': 'b',
+                                        'Template:Taken': 'kept',
+                                        'Template:Skipped': 'discarded'})
+        result = expand('{{#ifeq:b|{{B}}|{{Taken}}|{{Skipped}}}}', templates)
+        self.assertEqual(result, 'kept')
+        self.assertIn('Template:B', templates.fetched)
+        self.assertIn('Template:Taken', templates.fetched)
+        self.assertNotIn('Template:Skipped', templates.fetched)
+
+    def test_switch_case_label_containing_a_template_matches(self):
+        templates = {'Template:Case': 'yes'}
+        self.assertEqual(
+            expand('{{#switch:yes|{{Case}}=matched|#default=fell through}}', templates),
+            'matched')
+
+    def test_switch_case_label_that_does_not_match_falls_through_to_default(self):
+        templates = {'Template:Case': 'yes'}
+        self.assertEqual(
+            expand('{{#switch:no|{{Case}}=matched|#default=fell through}}', templates),
+            'fell through')
+
+    def test_switch_stops_expanding_labels_once_a_case_matches(self):
+        templates = RecordingTemplates({'Template:Early': 'hit',
+                                        'Template:Late': 'never reached',
+                                        'Template:Result': 'R'})
+        result = expand('{{#switch:hit|{{Early}}={{Result}}|{{Late}}=other}}', templates)
+        self.assertEqual(result, 'R')
+        self.assertIn('Template:Early', templates.fetched)
+        self.assertIn('Template:Result', templates.fetched)
+        self.assertNotIn('Template:Late', templates.fetched)
+
+    def test_switch_result_is_not_expanded_when_its_case_does_not_match(self):
+        templates = RecordingTemplates({'Template:Wanted': 'W',
+                                        'Template:Unwanted': 'U'})
+        result = expand('{{#switch:a|a={{Wanted}}|b={{Unwanted}}}}', templates)
+        self.assertEqual(result, 'W')
+        self.assertNotIn('Template:Unwanted', templates.fetched)
+
+    def test_switch_fall_through_label_containing_a_template_matches(self):
+        # A bare case label with no "=" falls through to the next
+        # labeled result; it is a comparison operand too.
+        templates = {'Template:Weekend': 'Sunday'}
+        self.assertEqual(
+            expand('{{#switch:Sunday|{{Weekend}}|Saturday=weekend|#default=weekday}}',
+                   templates),
+            'weekend')
+
+    def test_pipe_separated_case_labels_are_unaffected_by_the_expand_parameter(self):
+        # The multiple-values-share-one-result path: expansion is
+        # added around it, not into it, so it behaves the same with a
+        # callback in place as without one.
+        self.assertEqual(ex.sharp_switch('case5', '1|case5=result3', '#default=nope'),
+                         'result3')
+        self.assertEqual(ex.sharp_switch('case5', '1|case5=result3', '#default=nope',
+                                         expand=lambda text: text),
+                         'result3')
+
+    def test_fall_through_across_separate_plain_labels_still_works(self):
+        # "| Saturday | Sunday = weekend" reaches sharp_switch as two
+        # separate parameters, since splitParts() consumes the
+        # top-level pipe. The bare one sets the fall-through flag.
+        self.assertEqual(
+            expand('{{#switch:Saturday| Saturday | Sunday = weekend | #default = weekday}}'),
+            'weekend')
+
+
+class CallParserFunctionBindsExpandTests(unittest.TestCase):
+    """callParserFunction() takes an Extractor, not a separate
+    expansion callback: expandTemplates is bound from that same
+    Extractor, so there is no way to pair one Extractor's state with
+    another's expansion."""
+
+    def _extractor(self, templates):
+        return ex.Extractor(1, "1", "https://x", "Test Article", [],
+                            templates=templates, templatePrefix='Template:')
+
+    def test_switch_operands_are_expanded_when_an_extractor_is_given(self):
+        extractor = self._extractor({'Template:Case': 'yes'})
+        self.assertEqual(
+            ex.callParserFunction('#switch', ['yes', '{{Case}}=matched', '#default=no'],
+                                  extractor.frame, extractor=extractor),
+            'matched')
+
+    def test_ifeq_operands_are_expanded_when_an_extractor_is_given(self):
+        extractor = self._extractor({'Template:B': 'b'})
+        self.assertEqual(
+            ex.callParserFunction('#ifeq', ['b', '{{B}}', 'same', 'different'],
+                                  extractor.frame, extractor=extractor),
+            'same')
+
+    def test_operands_are_compared_as_given_without_an_extractor(self):
+        self.assertEqual(
+            ex.callParserFunction('#switch', ['yes', '{{Case}}=matched', '#default=no'], []),
+            'no')
+
+
+class DirectCallCompatibilityTests(unittest.TestCase):
+    """sharp_ifeq and sharp_switch are called directly by other tests
+    in this suite, with no expand callback. Their operands are then
+    used as given."""
+
+    def test_ifeq_without_an_expand_callback_compares_literally(self):
+        self.assertEqual(ex.sharp_ifeq('a', 'a', 'yes', 'no'), 'yes')
+        self.assertEqual(ex.sharp_ifeq('a', '{{B}}', 'yes', 'no'), 'no')
+
+    def test_switch_without_an_expand_callback_compares_literally(self):
+        self.assertEqual(ex.sharp_switch('b', 'a=A', 'b=B'), 'B')
+        self.assertEqual(ex.sharp_switch('b', '{{B}}=A', '#default=D'), 'D')
+
+    def test_expand_is_keyword_only_so_positional_calls_are_unaffected(self):
+        # A fourth positional argument to sharp_ifeq is valueIfFalse,
+        # not the callback.
+        self.assertEqual(ex.sharp_ifeq('a', 'z', 'yes', 'no'), 'no')
+
+
+class FixTitleChainRegressionTests(unittest.TestCase):
+    """Template:Fix/title on jawiki compares two padleft results to
+    decide how to join a date onto a tooltip. The comparison only
+    reaches the right answer if the operand after the pipe is
+    expanded."""
+
+    templates = {
+        'Template:Padded': '{{padleft:|15|{{{1|}}}}}',
+        'Template:FixTitle': ('{{#ifeq:{{Padded|{{{1|}}}}}|{{Padded|{{{2|}}}}}'
+                              '|identical|combined}}'),
+    }
+
+    def test_matching_operands_take_the_true_branch(self):
+        self.assertEqual(expand('{{FixTitle|abc|abc}}', self.templates), 'identical')
+
+    def test_differing_operands_take_the_false_branch(self):
+        self.assertEqual(expand('{{FixTitle|abc|xyz}}', self.templates), 'combined')
+
+    def test_no_wikitext_leaks_from_the_comparison(self):
+        result = expand('{{FixTitle|abc|abc}}', self.templates)
+        self.assertNotIn('{{', result)
+        self.assertNotIn('padleft', result)
 
 
 if __name__ == '__main__':

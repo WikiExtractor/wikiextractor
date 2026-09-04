@@ -2691,8 +2691,30 @@ def sharp_if(testValue, valueIfTrue, valueIfFalse=None, *args):
     return ""
 
 
-def sharp_ifeq(lvalue, rvalue, valueIfTrue, valueIfFalse=None, *args):
-    rvalue = rvalue.strip()
+def _expandOperand(operand, expand):
+    """Expand a comparison operand of #ifeq or #switch.
+
+    :param expand: the Extractor's own expandTemplates, or None when
+        the function is called directly rather than through
+        callParserFunction() (unit tests, mainly) -- in which case the
+        operand is used as given.
+
+    The '{' test keeps operands that cannot contain a template or a
+    tplarg -- nearly all of them, since case labels are usually plain
+    words -- off the expansion path entirely.
+    """
+    if expand is not None and '{' in operand:
+        return expand(operand)
+    return operand
+
+
+def sharp_ifeq(lvalue, rvalue, valueIfTrue, valueIfFalse=None, *args, expand=None):
+    # Both operands take part in the comparison, so both are expanded.
+    # lvalue arrives expanded, as parts[0] of the parser function call;
+    # rvalue is expanded here. The two branches are not touched: at
+    # most one is returned, and expandTemplate() expands whatever comes
+    # back.
+    rvalue = _expandOperand(rvalue, expand).strip()
     if rvalue:
         # lvalue is always defined
         if lvalue.strip() == rvalue:
@@ -2718,7 +2740,7 @@ def sharp_iferror(test, then='', Else=None, *args):
         return Else.strip()
 
 
-def sharp_switch(primary, *params):
+def sharp_switch(primary, *params, expand=None):
     # FIXME: we don't support numeric expressions in primary
 
     # {{#switch: comparison string
@@ -2738,7 +2760,13 @@ def sharp_switch(primary, *params):
         # handle cases like:
         #  #default = [http://www.perseus.tufts.edu/hopper/text?doc=Perseus...]
         pair = param.split('=', 1)
-        lvalue = pair[0].strip()
+        # The case label is a comparison operand, so it is expanded;
+        # the result after '=' is not, since #switch returns at most
+        # one result and expandTemplate() expands whatever comes back.
+        # Labels are expanded one at a time as the scan reaches them,
+        # so a match stops the scan and leaves the remaining labels
+        # unexpanded.
+        lvalue = _expandOperand(pair[0], expand).strip()
         rvalue = None
         if len(pair) > 1:
             # got "="
@@ -3189,15 +3217,23 @@ def callParserFunction(functionName, args, frame, page_title=None, page_id=None,
         #expr and #ifexpr specifically, which log them on failure to
         make a malformed on-wiki call findable; no other parser
         function currently needs them.
-    :param extractor: the calling Extractor, threaded through to
-        #expr and #ifexpr specifically for their own per-article
-        malformed-#expr counting/dedup (see sharp_expr()'s own
-        docstring) -- same reasoning as page_title/page_id above, no
-        other parser function currently needs it.
+    :param extractor: the calling Extractor. Threaded through to
+        #expr and #ifexpr for their own per-article malformed-#expr
+        counting/dedup (see sharp_expr()'s own docstring), and its
+        expandTemplates is what #ifeq and #switch expand their
+        comparison operands with (see lazyParserFunctions). Without
+        one, those operands are compared as given.
     :return: the result of the invocation, None in case of failure.
 
     http://meta.wikimedia.org/wiki/Help:ParserFunctions
     """
+
+    # #ifeq and #switch expand their comparison operands themselves,
+    # on demand; expandTemplates is bound here rather than taken as a
+    # separate parameter, so there is one Extractor in play and no way
+    # for a caller to pair one Extractor's state with another's
+    # expansion.
+    expand = extractor.expandTemplates if extractor is not None else None
 
     try:
         if functionName == '#invoke':
@@ -3209,6 +3245,10 @@ def callParserFunction(functionName, args, frame, page_title=None, page_id=None,
             return sharp_expr(*args, page_title=page_title, page_id=page_id, extractor=extractor)
         if functionName == '#ifexpr':
             return sharp_ifexpr(*args, page_title=page_title, page_id=page_id, extractor=extractor)
+        if functionName == '#ifeq':
+            return sharp_ifeq(*args, expand=expand)
+        if functionName == '#switch':
+            return sharp_switch(*args, expand=expand)
         if functionName in parserFunctions:
             ret = parserFunctions[functionName](*args)
             # logger.debug('parserFunction> %s(%s) %s', functionName, args, ret)
