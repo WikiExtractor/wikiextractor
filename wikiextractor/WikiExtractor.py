@@ -1143,7 +1143,7 @@ def main():
                         help="use or create file containing templates")
     groupP.add_argument("--no-templates", action="store_true",
                         help="Do not expand templates")
-    groupP.add_argument("--html-safe", default=True,
+    parser.add_argument("--html-safe", default=True, action=argparse.BooleanOptionalAction,
                         help="use to produce HTML safe output within <doc>...</doc>")
     default_process_count = cpu_count() - 1
     parser.add_argument("--processes", type=int, default=default_process_count,
