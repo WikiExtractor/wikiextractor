@@ -1599,6 +1599,22 @@ _SUBST_WORDS_RE = re.compile(substWords, re.IGNORECASE)
 _TEMPLATE_PARAM_RE = re.compile(r" *([^=']*?) *=(.*)", re.DOTALL)
 
 
+def escapeDocAttribute(value):
+    """Escape a value for use inside a double-quoted attribute of the
+    <doc> tag.
+
+    Article titles arrive as written -- '"Weird Al" Yankovic', 'AT&T',
+    'Nokia 3310 <> 3410' -- and each of ", &, < and > ends the
+    attribute or the tag early for anything that parses the output as
+    markup.
+
+    Apostrophes are left alone. They are safe between double quotes,
+    and escaping them would rewrite a large share of all titles for no
+    gain, which is also why html.escape's quote=True is not used here.
+    """
+    return html.escape(str(value), quote=False).replace('"', '&quot;')
+
+
 class Extractor():
     """
     An extraction task on a article.
@@ -1722,9 +1738,16 @@ class Extractor():
             out.write('\n'.join(text))
             out.write('\n\n\n')
         else:
-            header = '<doc id="%s" url="%s" title="%s">\n' % (self.id, self.url, self.title)
+            header = '<doc id="%s" url="%s" title="%s">\n' % (
+                escapeDocAttribute(self.id),
+                escapeDocAttribute(self.url),
+                escapeDocAttribute(self.title))
+            # The title also opens the document as ordinary text, so
+            # it is escaped the way clean_text() escapes the body:
+            # &, < and > become entities, quotes stay as they are.
+            title_line = html.escape(self.title, quote=False) if html_safe else self.title
             # Separate header from text with a newline.
-            header += self.title + '\n\n'
+            header += title_line + '\n\n'
             footer = "\n</doc>\n"
             out.write(header)
             out.write('\n'.join(text))
