@@ -2596,10 +2596,20 @@ def _sharp_expr_eval_node(node):
 #   first character of an existing "==").
 _EQUALS_TO_DOUBLE_EQUALS_RE = re.compile(r'(?<![<>=!])=(?!=)')
 
+# #expr spells inequality both "<>" and "!="; Python only has the
+# latter, having dropped "<>" in Python 3, so ast.parse() rejects the
+# whole expression. Converted before the "=" substitution above, whose
+# lookbehind already excludes the "!" this produces. jawiki's
+# Template:Is-leap-year is one caller -- "{{{1}}} mod 100 <> 0" -- and
+# through it every year article from 1 to 1582 lost the 平年/閏年 link
+# its opening sentence is built around.
+_NOT_EQUALS_RE = re.compile(r'<>')
+
 
 def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
     try:
         orig_expr = expr
+        expr = _NOT_EQUALS_RE.sub('!=', expr)
         expr = _EQUALS_TO_DOUBLE_EQUALS_RE.sub('==', expr)
         expr = re.sub(r'\bmod\b', '%', expr)
         expr = re.sub(r'\bdiv\b', '/', expr)
