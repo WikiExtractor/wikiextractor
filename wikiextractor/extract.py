@@ -214,15 +214,6 @@ discardElements = [
     # above. Confirmed leaking through verbatim (also HTML-escaped) on
     # a real pnb.wikipedia.org page (id 40471).
     'categorytree',
-    # The reading half of an East Asian ruby annotation (furigana):
-    # rt holds the reading, rtc a second one, and rp the parentheses a
-    # renderer without ruby support falls back to. The base text they
-    # annotate is kept -- ruby and rb are in ignoredTags -- so
-    # "加藤{{ruby|由美|よしみ}}" extracts as "加藤由美". Keeping the
-    # reading would splice a second spelling of the same word into the
-    # running text, and ruby markup that omits rp (most of it) would
-    # fuse base and reading with nothing between them.
-    'rp', 'rt', 'rtc',
 ]
 
 ##
@@ -247,6 +238,62 @@ def get_url(urlbase, uid):
 
 
 # ======================================================================
+
+
+
+# An East Asian ruby annotation -- base text with a smaller reading
+# printed above it, furigana in Japanese. The pieces are <ruby>
+# wrapping the whole thing, <rb> the base, <rt> the reading, <rtc> a
+# second reading, and <rp> the parentheses a renderer without ruby
+# support falls back to.
+#
+# Stripping the tags and keeping every piece reproduces that fallback
+# rendering, which is the right plain text -- but only when the markup
+# supplies <rp>, and much of it does not. Without the parentheses,
+# base and reading run together into one string that is neither:
+# 漢字かんじ rather than 漢字（かんじ）.
+#
+# So parenthesizeRuby() supplies them. It looks at each ruby block,
+# and if the block has no fallback punctuation of its own, wraps each
+# reading in fullwidth parentheses; ruby annotation is CJK typography,
+# where those are the convention. Blocks that do have it are left
+# alone, so nothing is parenthesized twice. Everything downstream is
+# then plain tag removal: the five tags are in ignoredTags.
+_RUBY_BLOCK_RE = re.compile(r'<\s*ruby\b[^>]*>(.*?)<\s*/\s*ruby\s*>',
+                            re.DOTALL | re.IGNORECASE)
+
+# jawiki's Template:読み仮名 -- which supplies the reading in the
+# opening sentence of a very large share of all jawiki articles --
+# marks its parentheses up as <span class="rp"> rather than as <rp>,
+# so matching the tag name alone misses them and every one of those
+# readings would be parenthesized a second time.
+_RUBY_FALLBACK_RE = re.compile(
+    r'<\s*rp\b'
+    r'|<\s*span\b[^>]*\bclass\s*=\s*"[^"]*(?<![-\w])rp(?![-\w])[^"]*"',
+    re.IGNORECASE)
+
+_RUBY_READING_RE = re.compile(r'(<\s*rt\b[^>]*>)(.*?)(<\s*/\s*rt\s*>)',
+                              re.DOTALL | re.IGNORECASE)
+
+
+def parenthesizeRuby(text):
+    """Add fallback parentheses around ruby readings that have none.
+
+    Ruby blocks whose markup already provides them -- as <rp> or as
+    the <span class="rp"> jawiki templates use -- are returned
+    unchanged.
+    """
+    def fixBlock(match):
+        inner = match.group(1)
+        if _RUBY_FALLBACK_RE.search(inner):
+            return match.group(0)
+        fixed = _RUBY_READING_RE.sub(
+            lambda reading: '%s（%s）%s' % (reading.group(1), reading.group(2),
+                                            reading.group(3)),
+            inner)
+        return match.group(0).replace(inner, fixed, 1)
+
+    return _RUBY_BLOCK_RE.sub(fixBlock, text)
 
 
 def clean(extractor, text, expand_templates=False, html_safe=True):
@@ -304,6 +351,13 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
         text = quote_quote.sub(r'"\1"', text)
     # residuals of unbalanced quotes
     text = text.replace("'''", '').replace("''", '"')
+
+    # Must run before the ignored-tag spans below are collected: the
+    # ruby tags are among them, so once they are gone there is no
+    # block left to tell an unpunctuated reading from a punctuated
+    # one. It also changes text's length, same as the two
+    # substituteLineBreakTag() calls below.
+    text = parenthesizeRuby(text)
 
     # Collect spans
 
@@ -1198,10 +1252,13 @@ ignoredTags = (
     'abbr', 'b', 'bdi', 'big', 'blockquote', 'cite', 'div', 'em',
     'font', 'hiero', 'i', 'kbd', 'nowiki',
     'plaintext', 'poem',
-    # ruby wraps an East Asian ruby annotation and rb the base text
-    # inside it; the reading is discarded separately (see
-    # discardElements).
-    'rb', 'ruby',
+    # The parts of an East Asian ruby annotation: ruby wraps the
+    # whole thing, rb the base text, rt the reading, rtc a second
+    # reading, rp the parentheses a renderer without ruby support
+    # falls back to. All of their content is kept; parenthesizeRuby()
+    # runs first and supplies the fallback parentheses where the
+    # markup itself has none.
+    'rb', 'rp', 'rt', 'rtc', 'ruby',
     's', 'section', 'span', 'strike', 'strong',
     'sub', 'sup', 'tt', 'u', 'var'
 )
