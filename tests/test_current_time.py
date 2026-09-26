@@ -111,13 +111,13 @@ class CurrentVariableTests(unittest.TestCase):
         extractor.clean_text('', expand_templates=True)
         self.assertEqual(extractor.magicWords['CURRENTYEAR'], '2026')
         self.assertEqual(extractor.magicWords['CURRENTMONTH'], '09')
-        self.assertEqual(extractor.magicWords['CURRENTDAY'], '01')
+        self.assertEqual(extractor.magicWords['CURRENTDAY'], '1')
         self.assertEqual(extractor.magicWords['CURRENTHOUR'], '12')
-        self.assertEqual(extractor.magicWords['CURRENTTIME'], '12:34:56')
+        self.assertEqual(extractor.magicWords['CURRENTTIME'], '12:34')
 
     def test_the_variables_expand_in_wikitext(self):
         self.assertEqual(
-            expand('{{CURRENTYEAR}}-{{CURRENTMONTH}}-{{CURRENTDAY}}', PINNED),
+            expand('{{CURRENTYEAR}}-{{CURRENTMONTH}}-{{CURRENTDAY2}}', PINNED),
             '2026-09-01')
 
     def test_they_are_utc_not_the_local_clock(self):
@@ -131,10 +131,10 @@ class CurrentVariableTests(unittest.TestCase):
                      'p=datetime.datetime(2026,9,1,12,34,56,tzinfo=datetime.timezone.utc);'
                      'e=ex.Extractor(1,"1","x","T",[],templates={},currentTime=p);'
                      'e.clean_text("", expand_templates=True);'
-                     'print(e.magicWords["CURRENTDAY"], e.magicWords["CURRENTTIME"])'],
+                     'print(e.magicWords["CURRENTDAY2"], e.magicWords["CURRENTTIME"])'],
                     cwd='..', capture_output=True, text=True,
                     env=dict(os.environ, TZ=tz))
-                self.assertEqual(out.stdout.strip(), '01 12:34:56')
+                self.assertEqual(out.stdout.strip(), '01 12:34')
 
 
 class SharpTimeUsesTheExtractionTimeTests(unittest.TestCase):
@@ -153,7 +153,7 @@ class SharpTimeUsesTheExtractionTimeTests(unittest.TestCase):
         self.assertEqual(expand('{{#time:Y-m-d|1999-12-31}}', PINNED), '1999-12-31')
 
     def test_the_variables_and_sharp_time_agree(self):
-        result = expand('{{CURRENTYEAR}}-{{CURRENTMONTH}}-{{CURRENTDAY}} '
+        result = expand('{{CURRENTYEAR}}-{{CURRENTMONTH}}-{{CURRENTDAY2}} '
                         'and {{#time:Y-m-d}}', PINNED)
         self.assertEqual(result, '2026-09-01 and 2026-09-01')
 
@@ -182,7 +182,7 @@ class OneMomentPerRunTests(unittest.TestCase):
             with self.subTest(page=page):
                 self.assertEqual(expand('{{#time:H:i:s}}', PINNED), '12:34:56')
                 extractor.clean_text('', expand_templates=True)
-                self.assertEqual(extractor.magicWords['CURRENTTIME'], '12:34:56')
+                self.assertEqual(extractor.magicWords['CURRENTTIME'], '12:34')
 
     def test_an_unconfigured_extractor_still_gets_a_stable_moment(self):
         # Two Extractors built at different instants share the
@@ -194,6 +194,59 @@ class OneMomentPerRunTests(unittest.TestCase):
 
     def test_the_fallback_is_aware_utc(self):
         self.assertEqual(ex._FALLBACK_CURRENT_TIME.utcoffset(), datetime.timedelta(0))
+
+
+class DateVariableFamilyTests(unittest.TestCase):
+    """The formats MediaWiki reports, which differ between siblings:
+    DAY and MONTH1 are unpadded while DAY2 and MONTH are not, and TIME
+    carries no seconds."""
+
+    # 2026-03-07 is a Saturday, in ISO week 10, with a single-digit
+    # day and month so that padding is visible.
+    MARCH = datetime.datetime(2026, 3, 7, 5, 4, 3, tzinfo=datetime.timezone.utc)
+
+    def test_the_whole_family(self):
+        self.assertEqual(ex.dateVariables(self.MARCH), {
+            'YEAR': '2026', 'MONTH': '03', 'MONTH1': '3',
+            'DAY': '7', 'DAY2': '07', 'DOW': '6',
+            'HOUR': '05', 'TIME': '05:04', 'WEEK': '10',
+            'TIMESTAMP': '20260307050403',
+        })
+
+    def test_day_is_unpadded_and_day2_is_padded(self):
+        self.assertEqual(expand('{{CURRENTDAY}}/{{CURRENTDAY2}}', self.MARCH), '7/07')
+
+    def test_month1_is_unpadded_and_month_is_padded(self):
+        self.assertEqual(expand('{{CURRENTMONTH1}}/{{CURRENTMONTH}}', self.MARCH), '3/03')
+
+    def test_time_carries_no_seconds(self):
+        self.assertEqual(expand('{{CURRENTTIME}}', self.MARCH), '05:04')
+
+    def test_day_of_week_counts_sunday_as_zero(self):
+        sunday = datetime.datetime(2026, 3, 8, tzinfo=datetime.timezone.utc)
+        self.assertEqual(expand('{{CURRENTDOW}}', sunday), '0')
+        self.assertEqual(expand('{{CURRENTDOW}}', self.MARCH), '6')
+
+    def test_timestamp_is_the_fourteen_digit_form(self):
+        stamp = expand('{{CURRENTTIMESTAMP}}', self.MARCH)
+        self.assertEqual(stamp, '20260307050403')
+        # and round-trips back through the timestamp parser
+        self.assertEqual(ex._parseTimestamp(stamp), self.MARCH)
+
+    def test_local_mirrors_current(self):
+        # The wiki's configured timezone is UTC on Wikimedia wikis, so
+        # the two families report the same moment.
+        for suffix in ex.dateVariables(self.MARCH):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(expand('{{LOCAL%s}}' % suffix, self.MARCH),
+                                 expand('{{CURRENT%s}}' % suffix, self.MARCH))
+
+    def test_the_name_bearing_members_stay_empty(self):
+        # Naming a month needs the wiki's language data.
+        for name in ('CURRENTMONTHNAME', 'CURRENTDAYNAME', 'CURRENTMONTHABBREV',
+                     'LOCALMONTHNAME'):
+            with self.subTest(name=name):
+                self.assertEqual(expand('a{{%s}}b' % name, self.MARCH), 'ab')
 
 
 class CompactDateParsingTests(unittest.TestCase):

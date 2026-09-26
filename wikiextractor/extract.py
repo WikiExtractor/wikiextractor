@@ -1689,6 +1689,42 @@ def escapeDocAttribute(value):
     return html.escape(str(value), quote=False).replace('"', '&quot;')
 
 
+def wikiUrlencode(title):
+    """Encode a page title for a URL the way MediaWiki does: spaces
+    become underscores, and the punctuation a title legitimately
+    carries -- a namespace colon, a subpage slash -- is left alone.
+
+    This is what the E-suffixed variables report: {{PAGENAMEE}} is
+    {{PAGENAME}} run through it.
+    """
+    return urlencode(title.replace(' ', '_'), safe=':/')
+
+
+def dateVariables(now):
+    """The date and time a run reports, keyed by the suffix shared
+    between the CURRENT* and LOCAL* families.
+
+    Padding differs between siblings deliberately, matching MediaWiki:
+    DAY and MONTH1 are unpadded while DAY2 and MONTH are not, and TIME
+    carries no seconds. The name-bearing members of the family --
+    MONTHNAME, DAYNAME, MONTHABBREV, MONTHNAMEGEN -- are absent, since
+    naming a month needs the wiki's language data.
+    """
+    return {
+        'YEAR': '%04d' % now.year,
+        'MONTH': '%02d' % now.month,
+        'MONTH1': '%d' % now.month,
+        'DAY': '%d' % now.day,
+        'DAY2': '%02d' % now.day,
+        # Sunday is 0 here, where isoweekday() makes it 7.
+        'DOW': '%d' % (now.isoweekday() % 7),
+        'HOUR': '%02d' % now.hour,
+        'TIME': now.strftime('%H:%M'),
+        'WEEK': '%d' % now.isocalendar()[1],
+        'TIMESTAMP': now.strftime('%Y%m%d%H%M%S'),
+    }
+
+
 class Extractor():
     """
     An extraction task on a article.
@@ -1778,19 +1814,30 @@ class Extractor():
         :param mark_headers: True to distinguish headers from paragraphs
           e.g. "## Section 1"
         """
-        self.magicWords['NAMESPACE'] = self.title[:max(0, self.title.find(":"))]
-        self.magicWords['PAGENAME'] = self.title
-        self.magicWords['FULLPAGENAME'] = self.title
-        # UTC, which is the timezone MediaWiki reports these in (the
-        # LOCAL* variables are the ones that follow a local clock),
+        # Only main-namespace pages reach an Extractor, since
+        # collect_pages() selects on the page's own <ns> element, so
+        # the namespace is empty and the page name is the whole title.
+        # Main-namespace subpages are disabled on Wikimedia wikis,
+        # which makes the sub, base and root names the page name too.
+        encodedTitle = wikiUrlencode(self.title)
+        for name in ('PAGENAME', 'FULLPAGENAME', 'BASEPAGENAME',
+                      'SUBPAGENAME', 'ROOTPAGENAME', 'SUBJECTPAGENAME'):
+            self.magicWords[name] = self.title
+            self.magicWords[name + 'E'] = encodedTitle
+        for name in ('NAMESPACE', 'NAMESPACEE', 'SUBJECTSPACE', 'SUBJECTSPACEE'):
+            self.magicWords[name] = ''
+        self.magicWords['NAMESPACENUMBER'] = '0'
+        self.magicWords['PAGEID'] = str(self.id)
+        self.magicWords['REVISIONID'] = str(self.revid)
+
+        # UTC, the timezone MediaWiki reports the CURRENT* family in,
         # and taken from the extraction time so that every page in a
-        # run reports the same moment.
-        now = self.currentTime
-        self.magicWords['CURRENTYEAR'] = now.strftime('%Y')
-        self.magicWords['CURRENTMONTH'] = now.strftime('%m')
-        self.magicWords['CURRENTDAY'] = now.strftime('%d')
-        self.magicWords['CURRENTHOUR'] = now.strftime('%H')
-        self.magicWords['CURRENTTIME'] = now.strftime('%H:%M:%S')
+        # run reports the same moment. LOCAL* follows the wiki's own
+        # configured timezone, which is UTC on Wikimedia wikis, so the
+        # two families report alike.
+        for suffix, value in dateVariables(self.currentTime).items():
+            self.magicWords['CURRENT' + suffix] = value
+            self.magicWords['LOCAL' + suffix] = value
 
         text = clean(self, text, expand_templates=expand_templates,
                      html_safe=html_safe)

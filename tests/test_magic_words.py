@@ -121,13 +121,15 @@ class VariableResolutionTests(unittest.TestCase):
         self.assertEqual(expand('a{{!}}b'), 'a|b')
 
     def test_unassigned_variables_expand_to_nothing(self):
-        for name in ('SUBPAGENAME', 'NAMESPACENUMBER', 'TALKPAGENAME',
-                     'FULLPAGENAMEE', 'REVISIONID'):
+        # Still carrying no value: these need the wiki's own siteinfo
+        # or a live site statistic.
+        for name in ('TALKPAGENAME', 'TALKSPACE', 'SITENAME', 'SERVER',
+                     'CONTENTLANGUAGE', 'NUMBEROFARTICLES', 'CURRENTMONTHNAME'):
             with self.subTest(name=name):
                 self.assertEqual(expand('a{{%s}}b' % name), 'ab')
 
     def test_surrounding_text_is_left_alone(self):
-        self.assertEqual(expand('before {{REVISIONID}} after'), 'before after')
+        self.assertEqual(expand('before {{SITENAME}} after'), 'before after')
 
 
 class CaseSensitivityTests(unittest.TestCase):
@@ -193,7 +195,7 @@ class PrecedenceTests(unittest.TestCase):
         self.assertNotIn('template body', result)
 
     def test_a_template_named_after_an_unassigned_variable_is_ignored(self):
-        result = expand('a{{SUBPAGENAME}}b', {'Template:SUBPAGENAME': 'template body'})
+        result = expand('a{{SITENAME}}b', {'Template:SITENAME': 'template body'})
         self.assertIn('ab', result)
         self.assertNotIn('template body', result)
 
@@ -202,6 +204,91 @@ class PrecedenceTests(unittest.TestCase):
         # template by that name has to keep working.
         result = expand('{{PAGENAMEBASE}}', {'Template:PAGENAMEBASE': 'template body'})
         self.assertIn('template body', result)
+
+
+class PageNameValueTests(unittest.TestCase):
+    """Every page an Extractor sees is main-namespace, since
+    collect_pages() selects on the page's own <ns>. That fixes the
+    namespace as empty and the page name as the whole title, and
+    Wikimedia's main namespace has no subpages, so the sub, base and
+    root names are the page name too."""
+
+    TITLE = 'Kill Bill: Volume 1'
+
+    def values(self, title=None):
+        extractor = make_extractor(title=title or self.TITLE)
+        extractor.clean_text('', expand_templates=True)
+        return extractor.magicWords
+
+    def test_the_page_name_family_is_the_title(self):
+        words = self.values()
+        for name in ('PAGENAME', 'FULLPAGENAME', 'BASEPAGENAME',
+                     'SUBPAGENAME', 'ROOTPAGENAME', 'SUBJECTPAGENAME'):
+            with self.subTest(name=name):
+                self.assertEqual(words[name], self.TITLE)
+
+    def test_the_namespace_is_empty_even_when_the_title_has_a_colon(self):
+        # The colon in "Kill Bill: Volume 1" is part of the title, not
+        # a namespace prefix.
+        words = self.values()
+        self.assertEqual(words['NAMESPACE'], '')
+        self.assertEqual(words['NAMESPACEE'], '')
+        self.assertEqual(words['SUBJECTSPACE'], '')
+        self.assertEqual(words['NAMESPACENUMBER'], '0')
+
+    def test_a_title_with_a_slash_keeps_its_whole_name(self):
+        # Main-namespace subpages are disabled, so the slash is
+        # ordinary punctuation rather than a subpage separator.
+        words = self.values('AC/DC')
+        self.assertEqual(words['SUBPAGENAME'], 'AC/DC')
+        self.assertEqual(words['BASEPAGENAME'], 'AC/DC')
+        self.assertEqual(words['ROOTPAGENAME'], 'AC/DC')
+
+    def test_the_ids_come_from_the_page(self):
+        extractor = ex.Extractor('18964', '77', 'https://x', 'T', [],
+                                 templates={}, templatePrefix='Template:')
+        extractor.clean_text('', expand_templates=True)
+        self.assertEqual(extractor.magicWords['PAGEID'], '18964')
+        self.assertEqual(extractor.magicWords['REVISIONID'], '77')
+
+    def test_an_integer_id_is_rendered_as_text(self):
+        extractor = ex.Extractor(18964, 77, 'https://x', 'T', [],
+                                 templates={}, templatePrefix='Template:')
+        extractor.clean_text('', expand_templates=True)
+        self.assertEqual(extractor.magicWords['PAGEID'], '18964')
+
+    def test_they_expand_in_wikitext(self):
+        self.assertEqual(expand('{{PAGENAME}} in ns {{NAMESPACENUMBER}}',
+                                title='Some Article'),
+                         'Some Article in ns 0')
+
+
+class UrlEncodedVariableTests(unittest.TestCase):
+    """The E-suffixed variables: the same value encoded for a URL."""
+
+    def test_spaces_become_underscores(self):
+        self.assertEqual(ex.wikiUrlencode('Some Article'), 'Some_Article')
+
+    def test_a_title_colon_and_slash_survive(self):
+        self.assertEqual(ex.wikiUrlencode('Kill Bill: Volume 1'),
+                         'Kill_Bill:_Volume_1')
+        self.assertEqual(ex.wikiUrlencode('AC/DC'), 'AC/DC')
+
+    def test_other_punctuation_is_percent_encoded(self):
+        self.assertEqual(ex.wikiUrlencode('AT&T'), 'AT%26T')
+        self.assertEqual(ex.wikiUrlencode('"Heroes"'), '%22Heroes%22')
+
+    def test_the_e_variables_carry_the_encoded_title(self):
+        extractor = make_extractor(title='Kill Bill: Volume 1')
+        extractor.clean_text('', expand_templates=True)
+        for name in ('PAGENAMEE', 'FULLPAGENAMEE', 'BASEPAGENAMEE',
+                     'SUBPAGENAMEE', 'ROOTPAGENAMEE', 'SUBJECTPAGENAMEE'):
+            with self.subTest(name=name):
+                self.assertEqual(extractor.magicWords[name], 'Kill_Bill:_Volume_1')
+
+    def test_it_expands_in_wikitext(self):
+        self.assertEqual(expand('{{PAGENAMEE}}', title='Some Article'),
+                         'Some_Article')
 
 
 class ParserFunctionsUnaffectedTests(unittest.TestCase):
@@ -227,8 +314,8 @@ class VariablesInsideTemplatesTests(unittest.TestCase):
         self.assertIn('Some Article', expand('{{Header}}', templates, title='Some Article'))
 
     def test_an_empty_variable_as_a_parser_function_argument(self):
-        templates = {'Template:Sub': '{{#if:{{SUBPAGENAME}}|has sub|no sub}}'}
-        self.assertIn('no sub', expand('{{Sub}}', templates))
+        templates = {'Template:Site': '{{#if:{{SITENAME}}|named|unnamed}}'}
+        self.assertIn('unnamed', expand('{{Site}}', templates))
 
     def test_a_variable_as_a_template_argument(self):
         templates = {'Template:Echo': '{{{1|}}}'}
