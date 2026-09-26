@@ -61,6 +61,9 @@ Usage:
     python extract_page_range.py --input pnwiki-20260701-pages-articles.xml.bz2 \
         --extract-id 49,59 --output two_pages.xml.bz2
 
+    python extract_page_range.py --input jawiki-20260901-pages-articles.xml.bz2 \
+        --extract-id 4230 --output - | less
+
     python extract_page_range.py --input urwiki-20260701-pages-articles.xml.bz2 \
         --extract-id 2376854 --templates urwiki-templates.xml.bz2 --extract-templates \
         --output repro.xml.bz2
@@ -91,7 +94,15 @@ Notes:
       by the exporter, so a literal "<page>" line can't appear inside article
       text.
     - Output is written as .bz2 if the --output path ends in .bz2, otherwise
-      as plain XML text.
+      as plain XML text. --output - writes the dump to stdout instead, always
+      uncompressed; status lines and warnings go to stderr in every mode, so
+      the dump on stdout stays clean enough to pipe.
+    - Input bytes that are not valid UTF-8 stop the run, since the output is
+      meant to be a faithful excerpt. --decode-errors replace substitutes
+      U+FFFD and continues instead.
+    - Line endings are preserved as they appear in the source rather than
+      being translated, so an excerpt matches the span it came from byte for
+      byte on every platform.
     - --extract-templates requires wikiextractor's extract.py and this
       script's own extract_templates_by_id.py to both be importable
       (e.g. both on $PYTHONPATH, or extract_templates_by_id.py in the
@@ -101,6 +112,7 @@ Notes:
 
 import argparse
 import bz2
+import contextlib
 import os
 import re
 import sys
@@ -130,19 +142,79 @@ def parse_id_list(s):
     return ids
 
 
-def open_maybe_bz2_read(path):
+def utf8_stdout():
+    """Return sys.stdout, reconfigured to UTF-8 if it is not already.
+
+    sys.stdout otherwise encodes with the locale's encoding, which on
+    Windows is a legacy code page whenever stdout is redirected rather
+    than attached to a console.
+    """
+    stream = sys.stdout
+    encoding = (stream.encoding or '').lower().replace('-', '')
+    if encoding not in ('utf8', 'utf8sig') and hasattr(stream, 'reconfigure'):
+        stream.reconfigure(encoding='utf-8')
+    return stream
+
+
+def open_maybe_bz2_read(path, errors='strict'):
+    # newline='' keeps line endings exactly as they are in the source,
+    # so an excerpt is byte-identical to the span it came from.
     if path.endswith('.bz2'):
-        return bz2.open(path, 'rt', encoding='utf-8', errors='replace')
-    return open(path, 'r', encoding='utf-8', errors='replace')
+        return bz2.open(path, 'rt', encoding='utf-8', errors=errors, newline='')
+    return open(path, 'r', encoding='utf-8', errors=errors, newline='')
 
 
-def open_maybe_bz2_write(path):
+@contextlib.contextmanager
+def open_output(path):
+    """Open the output, or hand back stdout for '-'.
+
+    stdout is yielded without being closed afterwards: the caller does
+    not own it, and closing it would take the rest of the program's
+    output with it.
+    """
+    if path == '-':
+        yield utf8_stdout()
+        return
     if path.endswith('.bz2'):
-        return bz2.open(path, 'wt', encoding='utf-8')
-    return open(path, 'w', encoding='utf-8')
+        out = bz2.open(path, 'wt', encoding='utf-8', newline='')
+    else:
+        out = open(path, 'w', encoding='utf-8', newline='')
+    try:
+        yield out
+    finally:
+        out.close()
 
 
-def stream_pages(input_path):
+def line_ending(text):
+    """The line ending used by a chunk of the source, for building a
+    footer when the stream stops before reaching the real one."""
+    return '\r\n' if '\r\n' in text else '\n'
+
+
+def decoded_lines(f, input_path):
+    """Iterate f, turning a decoding failure into an explanation.
+
+    The output is meant to be a faithful excerpt of the input, so a
+    byte that is not valid UTF-8 stops the run by default rather than
+    being quietly replaced with U+FFFD in a page someone will later
+    treat as a reproduction of the real one.
+    """
+    while True:
+        try:
+            line = next(f)
+        except StopIteration:
+            return
+        except UnicodeDecodeError as err:
+            raise SystemExit(
+                f"ERROR: {input_path} is not valid UTF-8 ({err.reason} at "
+                f"byte {err.start} of a decoded chunk).\n"
+                f"       Re-run with --decode-errors replace to substitute "
+                f"U+FFFD and continue; note that pages containing the bad "
+                f"bytes will not match the source exactly.")
+        yield line
+
+
+def stream_pages(input_path, decode_errors='strict'):
     """
     Yields (header_text, page_text_generator) -- actually simpler: this is a
     generator-based single pass. We yield control via a small state machine
@@ -152,13 +224,13 @@ def stream_pages(input_path):
     Yields tuples: ('header', text) once, then ('page', text) per page,
     then ('footer', text) once.
     """
-    with open_maybe_bz2_read(input_path) as f:
+    with open_maybe_bz2_read(input_path, decode_errors) as f:
         header_lines = []
         in_page = False
         page_lines = []
         got_header = False
 
-        for line in f:
+        for line in decoded_lines(f, input_path):
             stripped = line.strip()
 
             if not in_page and stripped == '<page>':
@@ -238,18 +310,18 @@ def extract_templates_for_pages(out, page_texts_by_id, templates_path, max_passe
               f"in --templates: {missing}", file=sys.stderr)
 
 
-def do_count(input_path):
+def do_count(input_path, decode_errors='strict'):
     n = 0
-    for kind, _ in stream_pages(input_path):
+    for kind, _ in stream_pages(input_path, decode_errors):
         if kind == 'page':
             n += 1
     print(f"Total pages: {n}")
 
 
-def do_find_id(input_path, page_id):
+def do_find_id(input_path, page_id, decode_errors='strict'):
     """Report the 0-based ordinal position of a page, given its <id>."""
     idx = 0
-    for kind, text in stream_pages(input_path):
+    for kind, text in stream_pages(input_path, decode_errors):
         if kind == 'page':
             # crude but fine: the first <id>...</id> in a page block is the
             # page id (revision/contributor ids come after it in the block).
@@ -263,20 +335,22 @@ def do_find_id(input_path, page_id):
 
 
 def do_extract(input_path, output_path, start, end, templates_path=None,
-                extract_templates=False, max_passes=20):
+                extract_templates=False, max_passes=20, decode_errors='strict'):
     header = None
+    # Replaced by the source's own footer line if the stream reaches
+    # it; a run that stops early never sees one.
     footer = '</mediawiki>\n'
     idx = 0
     kept = 0
     page_texts_by_id = {}  # only populated if extract_templates is set
 
-    out = open_maybe_bz2_write(output_path)
-    try:
-        for kind, text in stream_pages(input_path):
+    with open_output(output_path) as out:
+        for kind, text in stream_pages(input_path, decode_errors):
             if kind == 'header':
                 header = text
                 out.write(header)
             elif kind == 'page':
+                footer = '</mediawiki>' + line_ending(text)
                 if start <= idx < end:
                     out.write(text)
                     kept += 1
@@ -293,17 +367,17 @@ def do_extract(input_path, output_path, start, end, templates_path=None,
         if extract_templates and page_texts_by_id:
             extract_templates_for_pages(out, page_texts_by_id, templates_path, max_passes)
         out.write(footer)
-    finally:
-        out.close()
 
-    print(f"Wrote {kept} pages (requested range [{start}, {end})) to {output_path}")
+    # stderr, so that --output - stays a clean dump on stdout.
+    print(f"Wrote {kept} pages (requested range [{start}, {end})) to {output_path}",
+          file=sys.stderr)
     if kept == 0:
         print("WARNING: 0 pages written -- check your --start/--end against the total "
               "page count (use --count first).", file=sys.stderr)
 
 
 def do_extract_ids(input_path, output_path, page_ids, templates_path=None,
-                    extract_templates=False, max_passes=20):
+                    extract_templates=False, max_passes=20, decode_errors='strict'):
     """
     Find the page(s) with the given <id>(s) and write them out as a
     standalone dump. Single streaming pass: stops as soon as every
@@ -321,13 +395,13 @@ def do_extract_ids(input_path, output_path, page_ids, templates_path=None,
     found_ids = []
     page_texts_by_id = {}  # only populated if extract_templates is set
 
-    out = open_maybe_bz2_write(output_path)
-    try:
-        for kind, text in stream_pages(input_path):
+    with open_output(output_path) as out:
+        for kind, text in stream_pages(input_path, decode_errors):
             if kind == 'header':
                 header = text
                 out.write(header)
             elif kind == 'page':
+                footer = '</mediawiki>' + line_ending(text)
                 m = re.search(r'<id>(\d+)</id>', text)
                 if m and int(m.group(1)) in still_needed:
                     out.write(text)
@@ -342,11 +416,10 @@ def do_extract_ids(input_path, output_path, page_ids, templates_path=None,
         if extract_templates and page_texts_by_id:
             extract_templates_for_pages(out, page_texts_by_id, templates_path, max_passes)
         out.write(footer)
-    finally:
-        out.close()
 
+    # stderr, so that --output - stays a clean dump on stdout.
     print(f"Wrote {len(found_ids)} page(s) ({', '.join(str(i) for i in found_ids)}) "
-          f"to {output_path}")
+          f"to {output_path}", file=sys.stderr)
     if still_needed:
         missing = ', '.join(str(i) for i in sorted(still_needed))
         print(f"WARNING: {len(still_needed)} id(s) not found: {missing}", file=sys.stderr)
@@ -363,7 +436,11 @@ def main():
                           'id, or a comma-separated list, e.g. 49,59 (requires --output)')
     ap.add_argument('--start', type=int, help='Start page index (0-based, inclusive)')
     ap.add_argument('--end', type=int, help='End page index (exclusive)')
-    ap.add_argument('--output', help='Output path (.xml or .xml.bz2)')
+    ap.add_argument('--output', help="Output path (.xml or .xml.bz2), or - for stdout "
+                                      "(always uncompressed; status goes to stderr)")
+    ap.add_argument('--decode-errors', choices=('strict', 'replace'), default='strict',
+                     help='How to handle bytes in --input that are not valid UTF-8: stop '
+                          '(default), or substitute U+FFFD and continue')
     ap.add_argument('--templates', help='Templates file to search when --extract-templates is given '
                                          '(.xml or .xml.bz2)')
     ap.add_argument('--extract-templates', action='store_true',
@@ -388,11 +465,11 @@ def main():
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
     if args.count:
-        do_count(args.input)
+        do_count(args.input, decode_errors=args.decode_errors)
         return
 
     if args.find_id is not None:
-        do_find_id(args.input, args.find_id)
+        do_find_id(args.input, args.find_id, decode_errors=args.decode_errors)
         return
 
     if args.extract_id is not None:
@@ -401,7 +478,8 @@ def main():
         do_extract_ids(args.input, args.output, args.extract_id,
                         templates_path=args.templates,
                         extract_templates=args.extract_templates,
-                        max_passes=args.max_passes)
+                        max_passes=args.max_passes,
+                        decode_errors=args.decode_errors)
         return
 
     if args.start is None or args.end is None or not args.output:
@@ -410,8 +488,16 @@ def main():
     do_extract(args.input, args.output, args.start, args.end,
                templates_path=args.templates,
                extract_templates=args.extract_templates,
-               max_passes=args.max_passes)
+               max_passes=args.max_passes,
+               decode_errors=args.decode_errors)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # `--output - | head` and friends. Point the fd at devnull so
+        # that the interpreter's own flush of stdout on the way out
+        # does not raise a second time.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(1)
