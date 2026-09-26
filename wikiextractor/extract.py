@@ -1068,6 +1068,8 @@ class MagicWords():
 
     @see https://doc.wikimedia.org/mediawiki-core/master/php/MagicWord_8php_source.html
     """
+    # MediaWiki's own ids for these, which it spells in lowercase;
+    # recognized below derives the uppercase surface forms from them.
     names = [
         '!',
         'currentmonth',
@@ -1148,11 +1150,27 @@ class MagicWords():
         'cascadingsources',
     ]
 
+    # The spellings a page actually writes, which expandTemplate()
+    # consults once per template invocation. Variables are case
+    # sensitive and written in uppercase, so {{PAGENAME}} is a
+    # variable while {{Pagename}} and {{pagename}} name a template.
+    # (MediaWiki marks a few of the site-info variables case
+    # insensitive; matching them strictly costs nothing, since none
+    # of those carry a value here and resolve empty either way.)
+    recognized = frozenset(name.upper() for name in names)
+
     def __init__(self):
+        # Keyed by the uppercase spelling, same as recognized.
         self.values = {'!': '|'}
 
+    def __contains__(self, name):
+        return name in self.recognized
+
     def __getitem__(self, name):
-        return self.values.get(name)
+        # A recognized variable that nothing has assigned a value to
+        # renders as the empty string, the way MediaWiki renders one
+        # it has nothing to fill in.
+        return self.values.get(name, '')
 
     def __setitem__(self, name, value):
         self.values[name] = value
@@ -1753,15 +1771,14 @@ class Extractor():
         :param mark_headers: True to distinguish headers from paragraphs
           e.g. "## Section 1"
         """
-        self.magicWords['namespace'] = self.title[:max(0, self.title.find(":"))]
-        #self.magicWords['namespacenumber'] = '0' # for article, 
-        self.magicWords['pagename'] = self.title
-        self.magicWords['fullpagename'] = self.title
-        self.magicWords['currentyear'] = time.strftime('%Y')
-        self.magicWords['currentmonth'] = time.strftime('%m')
-        self.magicWords['currentday'] = time.strftime('%d')
-        self.magicWords['currenthour'] = time.strftime('%H')
-        self.magicWords['currenttime'] = time.strftime('%H:%M:%S')
+        self.magicWords['NAMESPACE'] = self.title[:max(0, self.title.find(":"))]
+        self.magicWords['PAGENAME'] = self.title
+        self.magicWords['FULLPAGENAME'] = self.title
+        self.magicWords['CURRENTYEAR'] = time.strftime('%Y')
+        self.magicWords['CURRENTMONTH'] = time.strftime('%m')
+        self.magicWords['CURRENTDAY'] = time.strftime('%d')
+        self.magicWords['CURRENTHOUR'] = time.strftime('%H')
+        self.magicWords['CURRENTTIME'] = time.strftime('%H:%M:%S')
 
         text = clean(self, text, expand_templates=expand_templates,
                      html_safe=html_safe)
@@ -2039,8 +2056,10 @@ class Extractor():
             title = _SUBST_WORDS_RE.sub('', title, 1)
             subst = True
 
-        if title.lower() in self.magicWords.values:
-            return self.magicWords[title.lower()]
+        # Variables resolve here, ahead of any template lookup: a
+        # wiki page whose name matches one of them does not shadow it.
+        if title in self.magicWords:
+            return self.magicWords[title]
 
         # Parser functions
         # The first argument is everything after the first colon.
