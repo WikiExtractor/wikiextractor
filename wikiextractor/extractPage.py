@@ -53,7 +53,7 @@ def process_data(input_file, id, templates=False):
     if input_file.lower().endswith(".bz2"):
         input = bz2.open(input_file, mode='rt', encoding='utf-8')
     else:
-        input = open(input_file)
+        input = open(input_file, encoding='utf-8')
 
     page = []
     for line in input:

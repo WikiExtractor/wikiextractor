@@ -509,7 +509,12 @@ def get_memory_usage_mb(pid):
     as zero.
     """
     try:
-        with open('/proc/%d/status' % pid) as f:
+        # errors='replace' rather than a strict decode: the Name field
+        # in this file is the process's executable name, which is raw
+        # bytes the kernel does not constrain to any encoding. Only
+        # the VmRSS line is wanted, and a memory reading should not be
+        # lost to an undecodable byte elsewhere in the file.
+        with open('/proc/%d/status' % pid, encoding='utf-8', errors='replace') as f:
             for line in f:
                 if line.startswith('VmRSS:'):
                     # format: "VmRSS:\t    1632 kB"
