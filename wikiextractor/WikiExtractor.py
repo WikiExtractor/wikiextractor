@@ -509,11 +509,8 @@ def get_memory_usage_mb(pid):
     as zero.
     """
     try:
-        # errors='replace' rather than a strict decode: the Name field
-        # in this file is the process's executable name, which is raw
-        # bytes the kernel does not constrain to any encoding. Only
-        # the VmRSS line is wanted, and a memory reading should not be
-        # lost to an undecodable byte elsewhere in the file.
+        # The Name field holds raw bytes from the kernel; only VmRSS
+        # is wanted, so an undecodable byte elsewhere is tolerated.
         with open('/proc/%d/status' % pid, encoding='utf-8', errors='replace') as f:
             for line in f:
                 if line.startswith('VmRSS:'):
@@ -997,6 +994,23 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
             os.getpid(), articles_with_errors, articles_processed, *total_errs)
 
 
+def utf8_stdout():
+    """Return sys.stdout, reconfigured to UTF-8 if it is not already.
+
+    sys.stdout otherwise encodes with the locale's encoding, which on
+    Windows is a legacy code page whenever stdout is redirected rather
+    than attached to a console.
+
+    Call this in each process that writes to stdout: under "spawn", a
+    child does not inherit main()'s reconfiguration.
+    """
+    stream = sys.stdout
+    encoding = (stream.encoding or '').lower().replace('-', '')
+    if encoding not in ('utf8', 'utf8sig') and hasattr(stream, 'reconfigure'):
+        stream.reconfigure(encoding='utf-8')
+    return stream
+
+
 def reduce_process(output_queue, out_file, file_size, file_compress, next_ordinal_shared, progress_condition,
                     debug_map_reduce=False, log_level=logging.WARNING):
     """
@@ -1041,7 +1055,7 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
     configure_wikiextractor_logging(log_level)
     configure_mapreduce_logging(debug_map_reduce)
     if out_file == '-':
-        output = sys.stdout
+        output = utf8_stdout()
         if file_compress:
             wikiextractor_logger.warning("writing to stdout, so no output compression "
                              "(use an external tool)")
@@ -1105,7 +1119,7 @@ def reduce_process(output_queue, out_file, file_size, file_compress, next_ordina
         # buffered data -- without this, its last buffered write(s)
         # are simply lost when it exits, with no error at all,
         # reliably dropping exactly the last page from every dump.
-        if output != sys.stdout:
+        if output is not sys.stdout:
             output.close()
 
 
@@ -1275,7 +1289,7 @@ def main():
                     Extractor(id, revid, urlbase, title, page,
                               templates=article_templates,
                               redirects=article_redirects,
-                              **article_extractor_kwargs).extract(sys.stdout)
+                              **article_extractor_kwargs).extract(utf8_stdout())
         return
 
     output_path = args.output
