@@ -240,6 +240,70 @@ def get_url(urlbase, uid):
 
 
 
+# An element the page hides with display:none. MediaWiki templates use
+# it for machinery a reader never sees -- update banners, sort keys,
+# metadata for gadgets -- so its content does not belong in extracted
+# text however well it parses.
+_HIDDEN_OPEN_RE = re.compile(
+    r'''<(?P<tag>\w+)\b[^>]*?\bstyle\s*=\s*(?P<q>["\'])[^"\']*?\bdisplay\s*:\s*none[^"\']*(?P=q)[^>]*>''',
+    re.IGNORECASE)
+
+
+# Cheap enough to check before the real pattern, and true of almost
+# every page: no 'display' at all means nothing to remove.
+_HIDDEN_PRESENCE_RE = re.compile(r'display', re.IGNORECASE)
+
+
+@lru_cache(maxsize=64)
+def _tagPairPattern(tag):
+    """Opening and closing tags of one name, for walking to a
+    matching close. Cached: a page's hidden elements are nearly always
+    all spans."""
+    return re.compile(r'<(/?)%s\b[^>]*>' % re.escape(tag), re.IGNORECASE)
+
+
+def dropHiddenElements(text):
+    """Remove every display:none element, content and all.
+
+    The matching close tag is found by counting same-name tags
+    forward, since these elements nest: a plain <span> inside a hidden
+    one would otherwise let the first </span> close it early and leave
+    the rest of the content behind.
+
+    An element with no close tag, or one written self-closing, has
+    just its tag removed; the content after it is someone else's.
+    """
+    if not _HIDDEN_PRESENCE_RE.search(text):
+        return text
+    searchFrom = 0
+    while True:
+        opening = _HIDDEN_OPEN_RE.search(text, searchFrom)
+        if not opening:
+            return text
+        tag = opening.group('tag')
+        end = None
+        if not opening.group(0).rstrip().endswith('/>'):
+            pair = _tagPairPattern(tag.lower())
+            depth = 1
+            position = opening.end()
+            while depth:
+                nextTag = pair.search(text, position)
+                if not nextTag:
+                    break
+                position = nextTag.end()
+                depth += -1 if nextTag.group(1) else 1
+                if not depth:
+                    end = nextTag.end()
+        if end is None:
+            # Unbalanced or self-closing: drop the tag, keep going
+            # from where it was rather than rescanning it.
+            text = text[:opening.start()] + text[opening.end():]
+            searchFrom = opening.start()
+        else:
+            text = text[:opening.start()] + text[end:]
+            searchFrom = opening.start()
+
+
 # An East Asian ruby annotation -- base text with a smaller reading
 # printed above it, furigana in Japanese. The pieces are <ruby>
 # wrapping the whole thing, <rb> the base, <rt> the reading, <rtc> a
@@ -357,6 +421,11 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     # one. It also changes text's length, same as the two
     # substituteLineBreakTag() calls below.
     text = parenthesizeRuby(text)
+
+    # Before the ignored-tag spans below: span, div, sup and s all
+    # appear among them, so once their tags are stripped there is no
+    # element left to tell a hidden one from an ordinary one.
+    text = dropHiddenElements(text)
 
     # Collect spans
 
