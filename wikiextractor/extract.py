@@ -32,7 +32,6 @@ from urllib.parse import quote as urlencode
 from urllib.parse import unquote as urldecode
 from html.entities import name2codepoint
 import logging
-import time
 
 # Named separately from WikiExtractor.py's own 'wikiextractor.mapreduce'
 # logger: this one covers extraction mechanics specifically -- template
@@ -1698,7 +1697,8 @@ class Extractor():
     def __init__(self, id, revid, urlbase, title, page, templates=None, redirects=None,
                  templatePrefix='', knownNamespaces=None, acceptedNamespaces=None,
                  ignored_tag_patterns=None, keepLinks=False, keepSections=True,
-                 HtmlFormatting=False, to_json=False, to_text=False, discard_empty=False):
+                 HtmlFormatting=False, to_json=False, to_text=False, discard_empty=False,
+                 currentTime=None):
         """
         :param page: a list of lines.
         :param templates: the {title: text} template lookup this
@@ -1717,6 +1717,12 @@ class Extractor():
         :param redirects: the {title: target_title} redirect lookup,
             same shape and same defaulting behavior as templates
             above -- also no longer a module-level global.
+        :param currentTime: an aware datetime giving the time this
+            extraction is treated as running at, which the CURRENT*
+            variables report and which #time resolves an empty or
+            relative timestamp against. One value shared by every
+            Extractor in a run keeps those identical from the first
+            page to the last. Defaults to _FALLBACK_CURRENT_TIME.
         :param templatePrefix: :param knownNamespaces: :param
             acceptedNamespaces: :param ignored_tag_patterns: :param
             keepLinks: :param keepSections: :param HtmlFormatting:
@@ -1754,6 +1760,7 @@ class Extractor():
         self.to_json = to_json
         self.to_text = to_text
         self.discard_empty = discard_empty
+        self.currentTime = currentTime if currentTime is not None else _FALLBACK_CURRENT_TIME
         self.magicWords = MagicWords()
         self.frame = []
         self.recursion_exceeded_1_errs = 0  # template recursion within expandTemplates()
@@ -1774,11 +1781,16 @@ class Extractor():
         self.magicWords['NAMESPACE'] = self.title[:max(0, self.title.find(":"))]
         self.magicWords['PAGENAME'] = self.title
         self.magicWords['FULLPAGENAME'] = self.title
-        self.magicWords['CURRENTYEAR'] = time.strftime('%Y')
-        self.magicWords['CURRENTMONTH'] = time.strftime('%m')
-        self.magicWords['CURRENTDAY'] = time.strftime('%d')
-        self.magicWords['CURRENTHOUR'] = time.strftime('%H')
-        self.magicWords['CURRENTTIME'] = time.strftime('%H:%M:%S')
+        # UTC, which is the timezone MediaWiki reports these in (the
+        # LOCAL* variables are the ones that follow a local clock),
+        # and taken from the extraction time so that every page in a
+        # run reports the same moment.
+        now = self.currentTime
+        self.magicWords['CURRENTYEAR'] = now.strftime('%Y')
+        self.magicWords['CURRENTMONTH'] = now.strftime('%m')
+        self.magicWords['CURRENTDAY'] = now.strftime('%d')
+        self.magicWords['CURRENTHOUR'] = now.strftime('%H')
+        self.magicWords['CURRENTTIME'] = now.strftime('%H:%M:%S')
 
         text = clean(self, text, expand_templates=expand_templates,
                      html_safe=html_safe)
@@ -2979,6 +2991,11 @@ _TIME_ISO_RE = re.compile(r"""
 # The 14-digit form MediaWiki stores revision timestamps in.
 _TIME_MW_RE = re.compile(r'^\s*(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*$')
 
+# The 8-digit compact date, which is how a Wikimedia dump filename
+# spells its date. Midnight UTC, as it is for a hyphenated date with
+# no time on it.
+_TIME_COMPACT_DATE_RE = re.compile(r'^\s*(\d{4})(\d{2})(\d{2})\s*$')
+
 # A single offset from the current time, e.g. "+24hours" -- what
 # citation templates use to decide whether an access date is in the
 # future. Only units timedelta represents exactly are here: a "+1
@@ -2992,29 +3009,39 @@ _TIME_RELATIVE_UNITS = {
 }
 
 
-def _parseTimestamp(timestamp):
+# The wall-clock fallback for callers that do not supply an extraction
+# time of their own, captured once so that every page such a caller
+# extracts shares a single "now" rather than drifting a few seconds
+# apart over a run. WikiExtractor's own main() resolves the extraction
+# time explicitly and hands it to every Extractor, so this covers
+# library and test callers.
+_FALLBACK_CURRENT_TIME = datetime.datetime.now(datetime.timezone.utc)
+
+
+def _parseTimestamp(timestamp, now=None):
     """Return a timezone-aware datetime for a #time timestamp, or None
     when it is not one of the accepted forms.
 
-    An empty timestamp means now, as it does in MediaWiki. That and
-    the relative form make the result depend on when extraction runs,
-    which is also true of the real parser function; a run that needs
-    to be reproducible byte for byte should keep that in mind.
+    :param now: the extraction time, which an empty timestamp resolves
+        to and a relative timestamp offsets from, both as MediaWiki
+        does against its own render time. Defaults to
+        _FALLBACK_CURRENT_TIME.
     """
+    if now is None:
+        now = _FALLBACK_CURRENT_TIME
     timestamp = timestamp.strip()
     if not timestamp:
-        return datetime.datetime.now(datetime.timezone.utc)
+        return now
 
     relative = _TIME_RELATIVE_RE.match(timestamp)
     if relative:
         amount = int(relative.group(1))
         seconds = amount * _TIME_RELATIVE_UNITS[relative.group(2).lower()]
-        return (datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(seconds=seconds))
+        return now + datetime.timedelta(seconds=seconds)
 
-    mediawiki = _TIME_MW_RE.match(timestamp)
-    if mediawiki:
-        parts = [int(p) for p in mediawiki.groups()]
+    compact = _TIME_MW_RE.match(timestamp) or _TIME_COMPACT_DATE_RE.match(timestamp)
+    if compact:
+        parts = [int(p) for p in compact.groups()]
         try:
             return datetime.datetime(*parts, tzinfo=datetime.timezone.utc)
         except ValueError:
@@ -3039,7 +3066,7 @@ def _parseTimestamp(timestamp):
         return None
 
 
-def sharp_time(format_string, timestamp='', *args):
+def sharp_time(format_string, timestamp='', *args, now=None):
     """{{#time: FORMAT | TIMESTAMP }} -- render a date.
 
     Two results other than a formatted date are possible, and they
@@ -3053,8 +3080,11 @@ def sharp_time(format_string, timestamp='', *args):
 
     The language and local-time arguments MediaWiki takes after the
     timestamp are ignored: output here is Gregorian and UTC.
+
+    :param now: the extraction time an empty or relative timestamp
+        resolves against; see _parseTimestamp().
     """
-    parsed = _parseTimestamp(timestamp)
+    parsed = _parseTimestamp(timestamp, now)
     if parsed is None:
         return _SHARP_EXPR_ERROR_SPAN
 
@@ -3441,6 +3471,10 @@ parserFunctions = {
 
     '# language': lambda *args: '',  # not supported
 
+    # '#time' and '#timel' are handled directly in
+    # callParserFunction(), same as '#expr' and the branching
+    # functions, so that the extraction time can be threaded to them.
+    # Left here so that the names are still visible as implemented.
     '#time': sharp_time,
 
     # Local time, which would need the source wiki's own configured
@@ -3514,10 +3548,13 @@ def callParserFunction(functionName, args, frame, page_title=None, page_id=None,
         function currently needs them.
     :param extractor: the calling Extractor. Threaded through to
         #expr and #ifexpr for their own per-article malformed-#expr
-        counting/dedup (see sharp_expr()'s own docstring), and its
+        counting/dedup (see sharp_expr()'s own docstring), its
         expandTemplates is what #ifeq and #switch expand their
-        comparison operands with (see lazyParserFunctions). Without
-        one, those operands are compared as given.
+        comparison operands with (see lazyParserFunctions), and its
+        currentTime is the extraction time #time resolves an empty or
+        relative timestamp against. Without one, those operands are
+        compared as given and #time falls back to
+        _FALLBACK_CURRENT_TIME.
     :return: the result of the invocation, None in case of failure.
 
     http://meta.wikimedia.org/wiki/Help:ParserFunctions
@@ -3529,6 +3566,9 @@ def callParserFunction(functionName, args, frame, page_title=None, page_id=None,
     # for a caller to pair one Extractor's state with another's
     # expansion.
     expand = extractor.expandTemplates if extractor is not None else None
+    # The one "now" this extraction run resolves every relative or
+    # omitted #time timestamp against.
+    currentTime = extractor.currentTime if extractor is not None else None
 
     try:
         if functionName == '#invoke':
@@ -3540,6 +3580,8 @@ def callParserFunction(functionName, args, frame, page_title=None, page_id=None,
             return sharp_expr(*args, page_title=page_title, page_id=page_id, extractor=extractor)
         if functionName == '#ifexpr':
             return sharp_ifexpr(*args, page_title=page_title, page_id=page_id, extractor=extractor)
+        if functionName in ('#time', '#timel'):
+            return sharp_time(*args, now=currentTime)
         if functionName == '#ifeq':
             return sharp_ifeq(*args, expand=expand)
         if functionName == '#switch':

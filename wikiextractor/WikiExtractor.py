@@ -60,7 +60,9 @@ collecting template definitions.
 import argparse
 import bz2
 import contextlib
+import datetime
 import logging
+import os
 import os.path
 import platform
 import re  # TODO use regex when it will be standard
@@ -72,7 +74,8 @@ from multiprocessing import get_context, cpu_count
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, \
-    resolve_template_page, _DEFAULT_IGNORED_TAG_PATTERNS, DETAIL
+    resolve_template_page, _DEFAULT_IGNORED_TAG_PATTERNS, DETAIL, \
+    _parseTimestamp
 from . import template_blob
 
 # ===========================================================================
@@ -994,6 +997,41 @@ def extract_process(jobs_queue, output_queue, html_safe, debug_map_reduce=False,
             os.getpid(), articles_with_errors, articles_processed, *total_errs)
 
 
+def resolve_current_time(spec=None):
+    """Return the aware datetime this run treats as "now".
+
+    In order: an explicit spec, the SOURCE_DATE_EPOCH environment
+    variable that the reproducible-builds convention defines, then the
+    wall clock. Resolved once per run and handed to every Extractor,
+    so that the CURRENT* variables and any relative #time read the
+    same moment on the first page and the last.
+
+    :param spec: a timestamp in any form #time itself accepts, e.g.
+        20260901, 2026-09-01 or 2026-09-01T12:00:00Z. Parsed by
+        extract.py's own _parseTimestamp, so the two agree on what a
+        timestamp looks like.
+    :raises ValueError: if spec or SOURCE_DATE_EPOCH cannot be read.
+    """
+    if spec is not None:
+        parsed = _parseTimestamp(spec)
+        if parsed is None:
+            raise ValueError(
+                "cannot read %r as a time; expected a form such as 20260901, "
+                "2026-09-01 or 2026-09-01T12:00:00Z" % (spec,))
+        return parsed
+
+    epoch = os.environ.get('SOURCE_DATE_EPOCH')
+    if epoch:
+        try:
+            return datetime.datetime.fromtimestamp(int(epoch.strip()),
+                                                    datetime.timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            raise ValueError(
+                "SOURCE_DATE_EPOCH=%r is not a Unix timestamp" % (epoch,))
+
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 def utf8_stdout():
     """Return sys.stdout, reconfigured to UTF-8 if it is not already.
 
@@ -1164,6 +1202,13 @@ def main():
                         help="Do not expand templates")
     groupP.add_argument("--html-safe", default=True, action=argparse.BooleanOptionalAction,
                         help="use to produce HTML safe output within <doc>...</doc>")
+    groupP.add_argument("--current-time", metavar="TIME",
+                        help="the time this run is treated as running at, which the "
+                             "CURRENT* variables report and which {{#time:}} resolves "
+                             "a relative or omitted timestamp against; e.g. 20260901, "
+                             "2026-09-01 or 2026-09-01T12:00:00Z. Every page in the "
+                             "run shares it. Defaults to SOURCE_DATE_EPOCH if set, "
+                             "otherwise the wall clock (UTC)")
     default_process_count = cpu_count() - 1
     parser.add_argument("--processes", type=int, default=default_process_count,
                         help="Number of processes to use (default %(default)s)")
@@ -1210,10 +1255,16 @@ def main():
         log_level = logging.DEBUG
     configure_wikiextractor_logging(log_level)
 
+    try:
+        current_time = resolve_current_time(args.current_time)
+    except ValueError as err:
+        parser.error(str(err))
+
     keepLinks = args.links
     if args.html:
         keepLinks = True
     extractor_kwargs = {
+        'currentTime': current_time,
         'keepLinks': keepLinks,
         'HtmlFormatting': args.html,
         'to_json': args.json,
