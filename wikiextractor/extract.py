@@ -2380,6 +2380,60 @@ def splitParts(paramsList):
     return parameters
 
 
+def splitNamedPart(part):
+    """
+    Split one part of a template or parser-function call at the "="
+    separating a name from its value.
+
+    :param part: a single element of splitParts()' result.
+    :return: ``[name, value]``, or ``[part]`` when the part carries no
+        top-level "=" and is therefore positional.
+
+    splitParts() above is careful not to split at a "|" nested inside
+    {{...}}, {{{...}}} or [[...]], because a nested call's own
+    argument separators are none of its business. The same has to hold
+    for "=", for exactly the same reason, and a plain
+    ``part.split('=', 1)`` does not.
+
+    bhwiki's Template:MONTHNUMBER is the case that forced this. Its
+    #switch ends with a positional default case that is itself a
+    parser-function call taking a named argument::
+
+        {{#switch: {{lc:{{{1}}}}}
+         | january | जनवरी = 1
+         ...
+         | {{#ifexpr: {{अंक परिवर्तन|{{{1}}}|प्रकार=अरबी}} < 0 | ... | ... }}
+        }}
+
+    Splitting that last part at its first "=" cuts it in half in the
+    middle of the nested call, leaving
+
+        "{{#ifexpr:{{अंक परिवर्तन|4|प्रकार"   as the case label
+        "अरबी}}<0|...|...}}"                   as its result
+
+    -- and since the mangled label still contains a bare "|4|",
+    sharp_switch()'s pipe-separated-label check then matched it
+    against the primary and returned the second half verbatim. That is
+    where the "अरबी}}<0||}}" in bhwiki's राहुल सांकृत्यायन came from.
+    """
+    # Nearly every part is a plain "name = value" or a plain word, with
+    # no nesting to respect; keep those off findMatchingBraces()
+    # entirely, the same way _expandOperand() keeps them off the
+    # expansion path.
+    if '{' not in part and '[' not in part:
+        return part.split('=', 1)
+    cur = 0
+    for s, e in findMatchingBraces(part):
+        i = part.find('=', cur, s)
+        if i >= 0:
+            return [part[:i], part[i + 1:]]
+        cur = e
+    i = part.find('=', cur)
+    if i >= 0:
+        return [part[:i], part[i + 1:]]
+    return [part]
+
+
 # findMatchingBraces() is called extremely frequently -- recursively,
 # once per expandTemplates()/subst()/splitParts() invocation, at every
 # level of template nesting -- but only ever with ldelim in {0, 2, 3}:
@@ -3007,12 +3061,16 @@ def sharp_switch(primary, *params, expand=None):
     primary = primary.strip()
     found = False  # for fall through cases
     default = None
-    rvalue = None
     lvalue = ''
+    # Whether the part the loop last looked at was positional, i.e.
+    # carried no "=". Only the final part's answer matters, but it is
+    # cheaper to overwrite it each time round than to special-case the
+    # last iteration.
+    lastItemHadNoEquals = False
     for param in params:
         # handle cases like:
         #  #default = [http://www.perseus.tufts.edu/hopper/text?doc=Perseus...]
-        pair = param.split('=', 1)
+        pair = splitNamedPart(param)
         # The case label is a comparison operand, so it is expanded;
         # the result after '=' is not, since #switch returns at most
         # one result and expandTemplate() expands whatever comes back.
@@ -3020,8 +3078,8 @@ def sharp_switch(primary, *params, expand=None):
         # so a match stops the scan and leaves the remaining labels
         # unexpanded.
         lvalue = _expandOperand(pair[0], expand).strip()
-        rvalue = None
         if len(pair) > 1:
+            lastItemHadNoEquals = False
             # got "="
             rvalue = pair[1].strip()
             # check for any of multiple values pipe separated -- most
@@ -3039,13 +3097,26 @@ def sharp_switch(primary, *params, expand=None):
                 return rvalue
             elif lvalue == '#default':
                 default = rvalue
-            rvalue = None  # avoid defaulting to last case
-        elif lvalue == primary:
-            # If the value matches, set a flag and continue
-            found = True
-    # Default case
-    # Check if the last item had no = sign, thus specifying the default case
-    if rvalue is not None:
+        else:
+            lastItemHadNoEquals = True
+            if lvalue == primary:
+                # If the value matches, set a flag and continue
+                found = True
+    # Default case.
+    #
+    # A trailing part with no "=" is the default, and takes precedence
+    # over an earlier "#default =" -- MediaWiki's own order, see
+    # CoreParserFunctions::switch(), which tests $lastItemHadNoEquals
+    # before $default. lvalue still holds that part, already expanded
+    # and stripped by the loop.
+    #
+    # This used to be written as "if rvalue is not None", with rvalue
+    # cleared at the top of every iteration and again after every
+    # "name = value" part -- so it was None at this point no matter
+    # what the input was, and the trailing default never fired. Every
+    #     {{#switch: x | a = 1 | fallback }}
+    # returned '' instead of "fallback".
+    if lastItemHadNoEquals:
         return lvalue
     elif default is not None:
         return default

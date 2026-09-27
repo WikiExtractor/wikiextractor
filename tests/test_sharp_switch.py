@@ -45,18 +45,46 @@ class SharpSwitchBasicTests(unittest.TestCase):
         # falls through to whichever labeled case comes next.
         self.assertEqual(ex.sharp_switch('a', 'a', 'b=shared_result'), 'shared_result')
 
-    def test_last_item_with_no_equals_sign_and_no_match_returns_empty(self):
-        # Not "the last item becomes an implicit default" -- confirmed
-        # directly against the true, unmodified original
-        # implementation that this already returned '' before any of
-        # this performance work touched the function at all (the
-        # "rvalue = None # avoid defaulting to last case" line inside
-        # the loop means the end-of-function "if rvalue is not None"
-        # check can never actually trigger). Documenting the real,
-        # pre-existing behavior here, not attempting to fix it -- an
-        # unrelated, pre-existing quirk, out of scope for the
-        # performance fix this file exists to cover.
-        self.assertEqual(ex.sharp_switch('zzz', 'a=A', 'unmatched_bare_value'), '')
+    def test_last_item_with_no_equals_sign_is_the_default(self):
+        # MediaWiki's documented rule: "the last parameter, if it has
+        # no equals sign, is the default".
+        #
+        # This returned '' for years. The end-of-function check was
+        # written as "if rvalue is not None", with rvalue cleared at
+        # the top of every iteration and again after every labeled
+        # case, so it could never be anything but None by the time the
+        # check ran -- the branch was unreachable and the trailing
+        # default silently dropped.
+        self.assertEqual(ex.sharp_switch('zzz', 'a=A', 'unmatched_bare_value'),
+                         'unmatched_bare_value')
+
+    def test_the_trailing_default_is_stripped(self):
+        self.assertEqual(ex.sharp_switch('zzz', 'a=A', '  fallback  '), 'fallback')
+
+    def test_a_match_still_beats_the_trailing_default(self):
+        self.assertEqual(ex.sharp_switch('a', 'a=A', 'fallback'), 'A')
+
+    def test_the_trailing_default_beats_an_earlier_hash_default(self):
+        # MediaWiki's own order: CoreParserFunctions::switch() tests
+        # $lastItemHadNoEquals before falling back to $default.
+        self.assertEqual(ex.sharp_switch('zzz', '#default=named', 'trailing'),
+                         'trailing')
+
+    def test_a_hash_default_after_the_last_bare_case_still_wins(self):
+        # Here the last part does have "=", so there is no trailing
+        # default to prefer and #default applies as usual.
+        self.assertEqual(ex.sharp_switch('zzz', 'bare', '#default=named'), 'named')
+
+    def test_a_bare_case_that_matches_and_ends_the_list_returns_itself(self):
+        # {{#switch: a | x = X | a }} -- the match sets the fall-through
+        # flag but nothing follows it, so the trailing default (which
+        # is that same part) is what comes back.
+        self.assertEqual(ex.sharp_switch('a', 'x=X', 'a'), 'a')
+
+    def test_an_empty_trailing_part_defaults_to_empty(self):
+        # {{#switch: zzz | a = A | }} -- a trailing "|" before the
+        # closing braces is extremely common and must stay empty.
+        self.assertEqual(ex.sharp_switch('zzz', 'a=A', ''), '')
 
     def test_primary_value_is_stripped(self):
         self.assertEqual(ex.sharp_switch('  b  ', 'a=A', 'b=B'), 'B')
@@ -122,6 +150,31 @@ class SharpSwitchRealEndToEndTests(unittest.TestCase):
 
         result2 = extractor.clean_text('{{DayType|Tuesday}}', expand_templates=True)
         self.assertIn('weekday', '\n'.join(result2))
+
+    def test_abbr_keeps_the_words_it_wraps(self):
+        # Template:Abbr, reduced to the part that matters. Its visible
+        # text -- the abbreviation itself -- is the #switch's trailing
+        # default, reached whenever the optional third argument is not
+        # "i" or "IPA", which is nearly always.
+        #
+        # While the trailing default was being dropped, every {{abbr}}
+        # on every wiki deleted its own content, taking words out of
+        # the middle of a sentence rather than leaving anything to
+        # notice. bhwiki's भारत, mid-paragraph:
+        #
+        #   "भारत के {{abbr|फॉरेन एक्सचेंज रिमिटेंस|...}} साल 2014 में"
+        #     extracted as  "भारत के  साल 2014 में"
+        templates = {
+            'Template:Abbr': ('<abbr title="{{{2|}}}">{{#switch: {{{3|}}}'
+                              ' | i | IPA = {{IPA|{{{1|}}}}}'
+                              ' | {{{1|}}} }}</abbr>'),
+        }
+        extractor = ex.Extractor(1, "1", "https://x", "Test Article", [],
+                                 templates=templates, templatePrefix='Template:')
+        result = '\n'.join(extractor.clean_text(
+            'India received {{abbr|remittances|money sent home}} in 2014.',
+            expand_templates=True))
+        self.assertEqual(result, 'India received remittances in 2014.')
 
 
 if __name__ == '__main__':
