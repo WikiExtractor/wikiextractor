@@ -3027,19 +3027,27 @@ def sharp_ifeq(lvalue, rvalue, valueIfTrue, valueIfFalse=None, *args, expand=Non
     # most one is returned, and expandTemplate() expands whatever comes
     # back.
     rvalue = _expandOperand(rvalue, expand).strip()
-    if rvalue:
-        # lvalue is always defined
-        if lvalue.strip() == rvalue:
-            # The {{#ifeq:}} function is an if-then-else construct. The
-            # applied condition is "is rvalue equal to lvalue". Note that this
-            # does only string comparison while MediaWiki implementation also
-            # supports numerical comparissons.
-
-            if valueIfTrue:
-                return valueIfTrue.strip()
-        else:
-            if valueIfFalse:
-                return valueIfFalse.strip()
+    # The {{#ifeq:}} function is an if-then-else construct. The applied
+    # condition is "is rvalue equal to lvalue". Note that this does
+    # only string comparison while MediaWiki implementation also
+    # supports numerical comparisons.
+    #
+    # An empty rvalue is an operand like any other, and comparing
+    # against it decides a branch as usual: "" equals "" and differs
+    # from anything else. Skipping the comparison when rvalue is empty
+    # -- returning "" and so choosing neither branch -- is what
+    # Template:Main other tripped over on slwiki's Sekunda. It asks
+    #     {{#ifeq: {{NAMESPACE}} | {{ns:0}} | main | other }}
+    # and in the main namespace both operands are legitimately empty,
+    # so every page took the "other" branch: the quote template
+    # emitted its non-article table markup, whose cell styling reached
+    # the article as a line of raw CSS while the quotation itself was
+    # lost.
+    if lvalue.strip() == rvalue:
+        if valueIfTrue:
+            return valueIfTrue.strip()
+    elif valueIfFalse:
+        return valueIfFalse.strip()
     return ""
 
 
