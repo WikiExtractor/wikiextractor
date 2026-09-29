@@ -547,7 +547,7 @@ section = re.compile(r'(==+)\s*(.*?)\s*\1')
 
 listOpen = {'*': '<ul>', '#': '<ol>', ';': '<dl>', ':': '<dl>'}
 listClose = {'*': '</ul>', '#': '</ol>', ';': '</dl>', ':': '</dl>'}
-listItem = {'*': '<li>%s</li>', '#': '<li>%s</<li>', ';': '<dt>%s</dt>',
+listItem = {'*': '<li>%s</li>', '#': '<li>%s</li>', ';': '<dt>%s</dt>',
             ':': '<dd>%s</dd>'}
 
 
@@ -566,11 +566,32 @@ def compact(text, mark_headers=False, extractor=None):
     for line in text.split('\n'):
 
         if not line.strip():
-            if len(listLevel):    # implies extractor.HtmlFormatting
+            if listLevel:    # implies extractor.HtmlFormatting
                 for c in reversed(listLevel):
                     page.append(listClose[c])
-                    listLevel = ''
+                listLevel = ''
             continue
+
+        # Any line that is not itself a list item ends the list.
+        #
+        # This closes the list here, ahead of the branches below,
+        # rather than from a branch of its own among them. Two things
+        # depend on that. A heading is handled by a branch that ends
+        # in "continue", so a closing branch placed after it would
+        # never see the heading at all and would emit </ul> after the
+        # <h2> that ended the list. And a branch that closes the list
+        # is the branch that handles the line, so the line itself --
+        # the first line of ordinary prose after every list -- would
+        # never reach the branch that appends it, and would be
+        # dropped.
+        #
+        # ':' counts as ending a list here: the indent branch below
+        # claims those lines, so they are never list items whatever
+        # listOpen says about them.
+        if listLevel and line[0] not in '*#;':
+            for c in reversed(listLevel):
+                page.append(listClose[c])
+            listLevel = ''
 
         # Handle section titles
         m = section.match(line)
@@ -627,10 +648,6 @@ def compact(text, mark_headers=False, extractor=None):
                 page.append(listItem[type] % line)
             else:
                 continue
-        elif len(listLevel):    # implies extractor.HtmlFormatting
-            for c in reversed(listLevel):
-                page.append(listClose[c])
-            listLevel = []
 
         # Drop residuals of lists
         elif line[0] in '{|' or line[-1] == '}':
@@ -652,6 +669,13 @@ def compact(text, mark_headers=False, extractor=None):
             # # Drop preformatted
             # elif line[0] == ' ':
             #     continue
+
+    # A list running to the end of the text has nothing after it to
+    # trigger the close above, so close it here.
+    if listLevel:    # implies extractor.HtmlFormatting
+        for c in reversed(listLevel):
+            page.append(listClose[c])
+        listLevel = ''
 
     return page
 
