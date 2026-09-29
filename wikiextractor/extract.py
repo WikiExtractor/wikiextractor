@@ -1765,10 +1765,6 @@ substWords = 'subst:|safesubst:'
 # as findMatchingBraces()'s own pattern recompilation). One compiled
 # Pattern object supports both .match() and .sub().
 _SUBST_WORDS_RE = re.compile(substWords, re.IGNORECASE)
-# Same reasoning, for templateParams()'s own per-parameter split --
-# called once per parameter of every template invocation, so this one
-# runs even more often than _SUBST_WORDS_RE above.
-_TEMPLATE_PARAM_RE = re.compile(r" *([^=']*?) *=(.*)", re.DOTALL)
 
 
 def escapeDocAttribute(value):
@@ -2066,10 +2062,27 @@ class Extractor():
         # logger.debug('   expandTemplates> %d %s', len(self.frame), res)
         return res
 
-    def templateParams(self, parameters):
+    def templateParams(self, parameters, expand=True):
         """
         Build a dictionary with positional or name key to expanded parameters.
-        :param parameters: the parts[1:] of a template, i.e. all except the title.
+        :param parameters: the parts[1:] of a template, i.e. all except the
+            title, as written -- not yet expanded.
+        :param expand: whether to expand the names and values, which a
+            subst: invocation does not.
+
+        Whether a part is named is decided on the text as written, at the
+        first "=" that is not inside {{...}}, {{{...}}} or [[...]], and only
+        then are the two halves expanded. Deciding it after expansion instead
+        lets a nested call's own arguments create a parameter name out of
+        nothing. slwiki's Sekunda quotes a definition as
+
+            {{navedek|delež {{frac|31.556.925,9747}} tropskega leta}}
+
+        where {{frac}} expands to markup beginning
+        '<templatestyles src="Fraction/styles.css" />'. Splitting that
+        expansion at its first "=" turns the quotation -- a positional
+        argument -- into a parameter named '<templatestyles src', so
+        {{{1}}} is undefined and the quoted text never appears.
         """
         templateParams = {}
 
@@ -2095,8 +2108,12 @@ class Extractor():
             # UNLESS the parameter contains a link (to prevent possible gluing
             # the link to the following text after template substitution)
 
-            # Parameter values may contain "=" symbols, hence the parameter
-            # name extends up to the first such symbol.
+            # A parameter's name runs up to the first "=" that belongs to
+            # this part rather than to something nested inside it. The "="
+            # of an HTML attribute or a URL query string does count, and
+            # turns what was meant as a positional argument into a named
+            # one -- MediaWiki behaves the same way, which is why its own
+            # documentation tells editors to write "1=" around such values.
 
             # It is legal for a parameter to be specified several times, in
             # which case the last assignment takes precedence. Example:
@@ -2104,28 +2121,26 @@ class Extractor():
             # Therefore, we don't check if the parameter has been assigned a
             # value before, because anyway the last assignment should override
             # any previous ones.
-            # FIXME: Don't use DOTALL here since parameters may be tags with
-            # attributes, e.g. <div class="templatequotecite">
             # Parameters may span several lines, like:
             # {{Reflist|colwidth=30em|refs=
             # &lt;ref name=&quot;Goode&quot;&gt;Title&lt;/ref&gt;
 
-            # The '=' might occurr within an HTML attribute:
-            #   "&lt;ref name=value"
-            # but we stop at first.
-
-            # The '=' might occurr within quotes:
-            # ''''<span lang="pt-pt" xml:lang="pt-pt">cénicas</span>'''
-
-            m = _TEMPLATE_PARAM_RE.match(param)
-            if m:
+            pair = splitNamedPart(param)
+            if len(pair) > 1:
                 # This is a named parameter.  This case also handles parameter
                 # assignments like "2=xxx", where the number of an unnamed
                 # parameter ("2") is specified explicitly - this is handled
                 # transparently.
 
-                parameterName = m.group(1).strip()
-                parameterValue = m.group(2)
+                parameterName = pair[0]
+                parameterValue = pair[1]
+                if expand:
+                    # A name is nearly always a bare word, so keep those off
+                    # the expansion path the way _expandOperand() does.
+                    if '{' in parameterName:
+                        parameterName = self.expandTemplates(parameterName)
+                    parameterValue = self.expandTemplates(parameterValue)
+                parameterName = parameterName.strip()
 
                 if ']]' not in parameterValue:  # if the value does not contain a link, trim whitespace
                     parameterValue = parameterValue.strip()
@@ -2134,6 +2149,8 @@ class Extractor():
                 # this is an unnamed parameter
                 unnamedParameterCounter += 1
 
+                if expand:
+                    param = self.expandTemplates(param)
                 if ']]' not in param:  # if the value does not contain a link, trim whitespace
                     param = param.strip()
                 templateParams[str(unnamedParameterCounter)] = param
@@ -2282,14 +2299,11 @@ class Extractor():
 
         params = parts[1:]
 
-        if not subst:
-            # Evaluate parameters, since they may contain templates, including
-            # the symbol "=".
-            # {{#ifexpr: {{{1}}} = 1 }}
-            params = [self.expandTemplates(p) for p in params]
-
-        # build a dict of name-values for the parameter values
-        params = self.templateParams(params)
+        # Build a dict of name-values for the parameter values. The parts
+        # go in as written: templateParams() decides name from value on the
+        # unexpanded text and expands the two halves separately, so that an
+        # "=" a nested call produces cannot invent a parameter name.
+        params = self.templateParams(params, expand=not subst)
 
         # Guard against template self-inclusion loops. We compare (title,
         # params) rather than title alone: a template legitimately calling
@@ -2681,8 +2695,7 @@ def lcfirst(string):
 # Pre-compiled once here rather than passed as a raw string to
 # module-level re.match() on every fullyQualifiedTemplateTitle() call
 # -- once per template invocation whose title contains a colon after
-# its first character, same reasoning as _SUBST_WORDS_RE/
-# _TEMPLATE_PARAM_RE above.
+# its first character, same reasoning as _SUBST_WORDS_RE above.
 _TEMPLATE_TITLE_COLON_RE = re.compile(r'([^:]*)(:.*)')
 
 
