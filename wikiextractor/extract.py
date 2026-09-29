@@ -2892,6 +2892,40 @@ _EQUALS_TO_DOUBLE_EQUALS_RE = re.compile(r'(?<![<>=!])=(?!=)')
 # its opening sentence is built around.
 _NOT_EQUALS_RE = re.compile(r'<>')
 
+# MediaWiki's #expr is PHP arithmetic, and a PHP float reaches the
+# page through PHP's own float-to-string conversion, which honours the
+# "precision" ini setting -- 14 significant digits by default. "%.14g"
+# is that conversion.
+_EXPR_FLOAT_FORMAT = '%.14g'
+
+
+def _formatExprResult(value):
+    """Render an #expr result the way MediaWiki renders it.
+
+    Two things follow from the 14-significant-digit format, and
+    Python's str() gets both wrong.
+
+    A result that lands on a whole number is written without a
+    fractional part. MediaWiki's {{#expr: 2022/10 round 0}} is "202"
+    and {{#expr: 2.5*2}} is "5"; str() says "202.0" and "5.0". The
+    trailing ".0" is not cosmetic once the value flows onward: bhwiki's
+    2022 builds its opening sentence out of arithmetic on the year and
+    reads "202.00 के दशक", and templates that feed #expr straight into
+    a #switch or #ifeq find that "3.0" does not match the case
+    labelled "3".
+
+    And binary floating point's representation error stays hidden at
+    14 digits, where str() prints all of it: {{#expr: 0.1+0.2}} is
+    "0.3" on a wiki and "0.30000000000000004" here.
+
+    int results are left alone -- they are exact, PHP prints them in
+    full however long they are, and the comparison operators' own 1
+    and 0 arrive as ints.
+    """
+    if isinstance(value, float):
+        return _EXPR_FLOAT_FORMAT % value
+    return str(value)
+
 
 def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
     try:
@@ -2927,7 +2961,7 @@ def sharp_expr(expr, page_title=None, page_id=None, extractor=None):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', SyntaxWarning)
             tree = ast.parse(expr, mode='eval')
-        return str(_sharp_expr_eval_node(tree))
+        return _formatExprResult(_sharp_expr_eval_node(tree))
     except Exception:
         # The same malformed #expr call is frequently invoked many
         # times over within a single article (e.g. once per row of a
