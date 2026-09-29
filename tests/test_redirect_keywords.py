@@ -173,6 +173,43 @@ class UrduRedirectTests(RedirectKeywordsTestCase):
         self.assertIn('Ordinary article prose follows.', joined)
 
 
+class SlovenianRedirectTests(RedirectKeywordsTestCase):
+    """slwiki spells it "PREUSMERITEV".
+
+    Confirmed on slwiki's "Sekunda" (page id 164), where two of the
+    templates it reaches are redirects written that way:
+    "Predloga:E" -> "Predloga:X10^" and "Predloga:Quote" ->
+    "Predloga:Citatni blok". Unrecognized, each template's body was
+    transcluded as ordinary text, so the article read
+
+        ... podaljšalo definicijo za približno 1#PREUSMERITEV.
+
+    where "1×10⁻¹⁰" belonged -- the keyword surviving because the
+    wikilink after it is dropped as a link to a non-article page,
+    leaving the bare magic word behind in the prose.
+    """
+
+    def test_slovenian_redirect_keyword(self):
+        ex.define_template('Predloga:E', ['#PREUSMERITEV [[Predloga:X10^]]'],
+                           self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('Predloga:E'), 'Predloga:X10^')
+        self.assertNotIn('Predloga:E', self.templates)
+
+    def test_real_world_case_keyword_leak_is_gone(self):
+        ex.define_template('Predloga:E', ['#PREUSMERITEV [[Predloga:X10^]]'],
+                           self.templates, self.redirects)
+        ex.define_template('Predloga:X10^', ['{{{1|1}}}×10<sup>{{{2|}}}</sup>'],
+                           self.templates, self.redirects)
+
+        wikitext = 'podaljšalo definicijo za približno 1{{E|−10}}.'
+        extractor = ex.Extractor('1', '1', 'https://x', 'Sekunda', [wikitext],
+                                 templates=self.templates, redirects=self.redirects,
+                                 templatePrefix='Predloga:')
+        joined = '\n'.join(extractor.clean_text(wikitext))
+        self.assertNotIn('PREUSMERITEV', joined)
+        self.assertIn('1−10×10', joined)
+
+
 class FalsePositiveBoundaryTests(RedirectKeywordsTestCase):
     """The narrow, deliberately-tested false-positive surface: only
     matches at the very start of a template's first line, only as a

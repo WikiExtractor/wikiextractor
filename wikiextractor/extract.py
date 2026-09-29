@@ -178,7 +178,12 @@ _DEFAULT_KNOWN_NAMESPACES = frozenset(['Template'])
 # Extensible: add further confirmed, per-language keywords here as
 # they turn up on other wikis, rather than guessing translations
 # preemptively for languages not yet actually encountered.
-redirectKeywords = ['REDIRECT', 'چوريو', 'رجوع_مکرر']
+# Slovenian's PREUSMERITEV joined the list from slwiki's Sekunda,
+# where Predloga:E and Predloga:Quote are both redirects spelled that
+# way: unrecognized, their bodies were transcluded as text, so an
+# article read "podaljšalo definicijo za približno 1#PREUSMERITEV."
+# where "1×10⁻¹⁰" belonged.
+redirectKeywords = ['REDIRECT', 'PREUSMERITEV', 'چوريو', 'رجوع_مکرر']
 redirectRE = re.compile(
     r'#(?:%s)\b.*?\[\[([^\]]*)]]' % '|'.join(redirectKeywords),
     re.IGNORECASE)
