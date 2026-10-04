@@ -97,6 +97,80 @@ class ArgumentSplittingTests(unittest.TestCase):
             expand('{{Show|http://x/?a=1}}', self.templates), '[MISSING]')
 
 
+class ExtensionTagTests(unittest.TestCase):
+    """MediaWiki's preprocessor turns an extension tag into a single
+    node before it looks for an argument's "=", so an attribute inside
+    one cannot name a parameter.
+
+    enwiki's Achilles is the case. Its {{blockquote}} quoting the
+    Periplus of the Euxine Sea carries a named <ref> partway through
+    the quotation, and "name=" is the first "=" in the argument.
+    Splitting there leaves {{{1}}} undefined, Template:Blockquote
+    takes its "no text given" branch, and a 2,300-character quotation
+    is replaced by a maintenance category that cleaning then drops --
+    so the passage leaves no trace at all.
+
+    Both spellings have to be recognized. Article text is still
+    XML-escaped while templates are expanded, so a tag arrives as
+    "&lt;ref ...&gt;"; template bodies are unescaped when stored, so
+    they carry the plain form.
+    """
+
+    def test_a_named_ref_does_not_split_the_argument(self):
+        part = 'It is said that Thetis raised it.<ref name=Hedreen /> Goats graze.'
+        self.assertEqual(ex.splitNamedPart(part), [part])
+
+    def test_an_escaped_named_ref_does_not_split_the_argument(self):
+        part = 'It is said.&lt;ref name=&quot;Hedreen&quot; /&gt; Goats graze.'
+        self.assertEqual(ex.splitNamedPart(part), [part])
+
+    def test_an_equals_inside_a_paired_ref_does_not_split(self):
+        part = 'text<ref name="A">Smith, p=12</ref> more'
+        self.assertEqual(ex.splitNamedPart(part), [part])
+
+    def test_an_equals_after_a_ref_still_splits(self):
+        self.assertEqual(ex.splitNamedPart('a<ref>x</ref>b=c'),
+                         ['a<ref>x</ref>b', 'c'])
+
+    def test_an_equals_before_a_ref_still_splits(self):
+        self.assertEqual(ex.splitNamedPart('n=v<ref name=x />'),
+                         ['n', 'v<ref name=x />'])
+
+    def test_nowiki_and_math_are_covered_too(self):
+        for part in ('<nowiki>a=b</nowiki> tail', '<math>x=y</math> tail'):
+            with self.subTest(part=part):
+                self.assertEqual(ex.splitNamedPart(part), [part])
+
+    def test_an_unclosed_ref_covers_only_its_own_attributes(self):
+        # It must not swallow the rest of the argument, so an "=" that
+        # genuinely follows still separates.
+        self.assertEqual(ex.splitNamedPart('before <ref name=open> after = real'),
+                         ['before <ref name=open> after ', ' real'])
+
+    def test_a_plain_span_is_not_an_extension_tag(self):
+        # MediaWiki lets this one name a parameter, which is why its
+        # documentation tells editors to write "1=" around such values.
+        self.assertEqual(ex.splitNamedPart('<span lang="ar">text</span>'),
+                         ['<span lang', '"ar">text</span>'])
+
+    def test_the_achilles_blockquote_keeps_its_quotation(self):
+        templates = {
+            'Template:Blockquote': ('<blockquote>{{{text|{{{1|'
+                                    '{{main other|[[Category:Pages incorrectly '
+                                    'using the quote template]]}}}}}}}}'
+                                    '</blockquote>'),
+            'Template:Main other': '{{#ifeq:{{NAMESPACE}}|{{ns:0}}|{{{1|}}}|{{{2|}}}}}',
+        }
+        extractor = ex.Extractor(1, "1", "https://x", "Achilles", [],
+                                 templates=templates, templatePrefix='Template:')
+        result = '\n'.join(extractor.clean_text(
+            '{{blockquote|It is said that Thetis raised this island.'
+            '&lt;ref name=Hedreen /&gt; Goats graze on it.}}',
+            expand_templates=True))
+        self.assertIn('Thetis raised this island', result)
+        self.assertIn('Goats graze on it', result)
+
+
 class SekundaTests(unittest.TestCase):
     """The page, reduced: both faults together."""
 

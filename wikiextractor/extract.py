@@ -2423,6 +2423,67 @@ def splitParts(paramsList):
     return parameters
 
 
+# MediaWiki's preprocessor turns an extension tag into a single node
+# before it ever looks for a template argument's "=", so an attribute
+# inside one is invisible to that search. enwiki's Achilles is where
+# that matters: a {{blockquote}} quoting the Periplus of the Euxine
+# Sea carries <ref name=Hedreen /> partway through the quotation, and
+# "name=Hedreen" is the first "=" in the argument.
+#
+# This is the set registered by the extensions a Wikipedia normally
+# runs, which is what decides the question -- not an HTML notion of
+# which elements are self-contained. A plain <span style="..."> is
+# NOT one of these: MediaWiki really does let that attribute's "="
+# name a parameter, which is why its own documentation tells editors
+# to write "1=" around such values.
+_EXTENSION_TAGS = (
+    'categorytree', 'ce', 'charinsert', 'chem', 'gallery', 'graph',
+    'hiero', 'imagemap', 'indicator', 'inputbox', 'mapframe',
+    'maplink', 'math', 'nowiki', 'poem', 'pre', 'ref', 'references',
+    'score', 'section', 'source', 'syntaxhighlight', 'templatedata',
+    'templatestyles', 'timeline',
+)
+# Article text is still XML-escaped while templates are being
+# expanded -- unescape() runs later, in clean() -- so a tag reaches
+# this scan as "&lt;ref name=&quot;x&quot; /&gt;". Template bodies, by
+# contrast, are unescaped as they are stored, so both spellings turn
+# up and both have to be recognized.
+_LT = r'(?:<|&lt;)'
+_GT = r'(?:>|&gt;)'
+_EXTENSION_OPEN_RE = re.compile(
+    r'%s\s*(%s)\b((?:(?!%s).)*)%s'
+    % (_LT, '|'.join(_EXTENSION_TAGS), _GT, _GT),
+    re.IGNORECASE | re.DOTALL)
+
+
+@lru_cache(maxsize=128)
+def _extensionClosePattern(tag):
+    return re.compile(r'%s\s*/\s*%s\s*%s' % (_LT, re.escape(tag), _GT),
+                      re.IGNORECASE)
+
+
+def _extensionTagSpans(text):
+    """Yield (start, end) for every extension-tag element in text.
+
+    An element with no closing tag yields just its opening tag, so its
+    attributes are still covered -- that is where the "=" lives, and a
+    stray <ref> should not swallow the rest of the argument.
+    """
+    position = 0
+    while True:
+        opening = _EXTENSION_OPEN_RE.search(text, position)
+        if not opening:
+            return
+        end = opening.end()
+        if not opening.group(2).rstrip().endswith('/'):
+            closing = _extensionClosePattern(
+                opening.group(1).lower()).search(text, end)
+            if closing:
+                end = closing.end()
+        yield opening.start(), end
+        position = end
+
+
 def splitNamedPart(part):
     """
     Split one part of a template or parser-function call at the "="
@@ -2460,13 +2521,22 @@ def splitNamedPart(part):
     where the "अरबी}}<0||}}" in bhwiki's राहुल सांकृत्यायन came from.
     """
     # Nearly every part is a plain "name = value" or a plain word, with
-    # no nesting to respect; keep those off findMatchingBraces()
-    # entirely, the same way _expandOperand() keeps them off the
-    # expansion path.
-    if '{' not in part and '[' not in part:
+    # nothing to step over; keep those off the scanning path entirely,
+    # the same way _expandOperand() keeps them off the expansion path.
+    hasTag = '<' in part or '&lt;' in part
+    if '{' not in part and '[' not in part and not hasTag:
         return part.split('=', 1)
+    spans = list(findMatchingBraces(part))
+    if hasTag:
+        spans.extend(_extensionTagSpans(part))
+        spans.sort()
     cur = 0
-    for s, e in findMatchingBraces(part):
+    for s, e in spans:
+        # A brace group inside an extension tag, or the reverse: the
+        # enclosing span already covers this one.
+        if s < cur:
+            cur = max(cur, e)
+            continue
         i = part.find('=', cur, s)
         if i >= 0:
             return [part[:i], part[i + 1:]]
