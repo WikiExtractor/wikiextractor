@@ -186,6 +186,73 @@ class ExtensionTagTests(unittest.TestCase):
         self.assertIn('Goats graze on it', result)
 
 
+class SeparatorInsideAnExtensionTagTests(unittest.TestCase):
+    """The same rule applies to the "|" that separates one argument
+    from the next, not only to the "=" inside one.
+
+    hiwiki's साँचा:Pp-semi-template picks between a compact and a full
+    padlock notice, and the compact branch is an <imagemap> -- whose
+    own syntax is "|"-separated::
+
+        {{#ifeq: ... | <imagemap>
+         Image:Padlock-silver-medium.svg|20px
+         rect 0 0 1000 1000 [[Wikipedia:Protection policy|...]]
+         desc none
+        </imagemap> | <table>...</table> }}
+
+    Splitting at the image's own "|" cut the branch off after the file
+    name, so </imagemap> never arrived, the element could not be
+    paired up and discarded, and every protected page carried two
+    lines of it into the article:
+
+        &lt;imagemap&gt;
+         Image:Padlock-silver-medium.svg
+    """
+
+    def test_a_pipe_inside_an_extension_tag_does_not_separate(self):
+        body = ('#ifeq:a|a|<imagemap>\n Image:P.svg|20px\n'
+                ' rect 0 0 1 1 [[W:P|text]]\n desc none\n</imagemap>|TABLE')
+        parts = ex.splitParts(body)
+        self.assertEqual(len(parts), 4)
+        self.assertIn('</imagemap>', parts[2])
+        self.assertEqual(parts[3], 'TABLE')
+
+    def test_a_pipe_inside_a_comment_does_not_separate(self):
+        parts = ex.splitParts('a|<!-- note|aside -->b|c')
+        self.assertEqual(parts, ['a', '<!-- note|aside -->b', 'c'])
+
+    def test_a_pipe_inside_a_gallery_does_not_separate(self):
+        parts = ex.splitParts('x|<gallery>\nFile:A.jpg|caption\n</gallery>|y')
+        self.assertEqual(len(parts), 3)
+        self.assertIn('</gallery>', parts[1])
+
+    def test_escaped_tags_are_covered(self):
+        parts = ex.splitParts(
+            'x|&lt;imagemap&gt;\n Image:P.svg|20px\n&lt;/imagemap&gt;|y')
+        self.assertEqual(len(parts), 3)
+
+    def test_ordinary_separators_still_work(self):
+        self.assertEqual(ex.splitParts('a|b|c'), ['a', 'b', 'c'])
+        self.assertEqual(ex.splitParts('a|{{t|x}}|c'), ['a', '{{t|x}}', 'c'])
+
+    def test_the_padlock_element_is_discarded(self):
+        templates = {
+            'Template:Pp': ('{{#ifeq:{{{small|}}}|yes'
+                            '|<imagemap>\n Image:Padlock.svg|20px\n'
+                            ' rect 0 0 1 1 [[Project:Protection|note]]\n'
+                            ' desc none\n</imagemap>'
+                            '|<table><tr><td>full notice</td></tr></table>}}'),
+        }
+        extractor = ex.Extractor(1, "1", "https://x", "Test Article", [],
+                                 templates=templates, templatePrefix='Template:')
+        result = '\n'.join(extractor.clean_text(
+            'Body text.\n{{Pp|small=yes}}\nMore text.', expand_templates=True))
+        self.assertNotIn('imagemap', result)
+        self.assertNotIn('Padlock', result)
+        self.assertIn('Body text.', result)
+        self.assertIn('More text.', result)
+
+
 class SekundaTests(unittest.TestCase):
     """The page, reduced: both faults together."""
 
