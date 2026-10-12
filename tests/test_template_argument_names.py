@@ -147,6 +147,21 @@ class ExtensionTagTests(unittest.TestCase):
         self.assertEqual(ex.splitNamedPart('before <ref name=open> after = real'),
                          ['before <ref name=open> after ', ' real'])
 
+    def test_a_comment_does_not_split_the_argument(self):
+        # The preprocessor removes comments before it looks for the
+        # "=", so an editor's note inside a quotation is invisible to
+        # the split.
+        part = 'quoted text <!-- editor note: see p=12 --> more text'
+        self.assertEqual(ex.splitNamedPart(part), [part])
+
+    def test_an_escaped_comment_does_not_split_the_argument(self):
+        part = 'quoted text &lt;!-- editor note: see p=12 --&gt; more'
+        self.assertEqual(ex.splitNamedPart(part), [part])
+
+    def test_an_equals_after_a_comment_still_splits(self):
+        self.assertEqual(ex.splitNamedPart('<!-- c --> real = split'),
+                         ['<!-- c --> real ', ' split'])
+
     def test_a_plain_span_is_not_an_extension_tag(self):
         # MediaWiki lets this one name a parameter, which is why its
         # documentation tells editors to write "1=" around such values.
