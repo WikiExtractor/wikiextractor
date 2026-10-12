@@ -2462,6 +2462,14 @@ def _extensionClosePattern(tag):
                       re.IGNORECASE)
 
 
+# A comment is removed by the preprocessor before argument splitting,
+# so an "=" inside one never names a parameter either. Same two
+# spellings as the tags above, for the same reason. Only a terminated
+# comment is recognized: an unterminated one is rare enough that
+# matching to end-of-text would risk more than it saves.
+_COMMENT_SPAN_RE = re.compile(r'(?:<|&lt;)!--.*?--(?:>|&gt;)', re.DOTALL)
+
+
 def _extensionTagSpans(text):
     """Yield (start, end) for every extension-tag element in text.
 
@@ -2529,6 +2537,7 @@ def splitNamedPart(part):
     spans = list(findMatchingBraces(part))
     if hasTag:
         spans.extend(_extensionTagSpans(part))
+        spans.extend(m.span() for m in _COMMENT_SPAN_RE.finditer(part))
         spans.sort()
     cur = 0
     for s, e in spans:
