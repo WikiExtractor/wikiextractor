@@ -210,6 +210,45 @@ class SlovenianRedirectTests(RedirectKeywordsTestCase):
         self.assertIn('1−10×10', joined)
 
 
+class HindiRedirectTests(RedirectKeywordsTestCase):
+    """hiwiki has two spellings in use, "अनुप्रेषित" and
+    "पुनर्प्रेषित".
+
+    Both turned up in a full hiwiki extraction, and both on
+    lang-family templates, so articles quoting a name in another
+    script lost it and kept the magic word instead::
+
+        फ़ारसी (#अनुप्रेषित), एक भाषा है ...
+        मदीना या अल-मदीना (अरबी: #अनुप्रेषित) ...
+
+    where the Perso-Arabic and Arabic forms belonged.
+    """
+
+    def test_anupreshit_keyword(self):
+        ex.define_template('साँचा:Fa', ['#अनुप्रेषित [[साँचा:फ़ारसी]]'],
+                           self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('साँचा:Fa'), 'साँचा:फ़ारसी')
+        self.assertNotIn('साँचा:Fa', self.templates)
+
+    def test_punarpreshit_keyword(self):
+        ex.define_template('साँचा:Ps', ['#पुनर्प्रेषित [[साँचा:लैंग]]'],
+                           self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('साँचा:Ps'), 'साँचा:लैंग')
+
+    def test_real_world_case_keyword_leak_is_gone(self):
+        ex.define_template('साँचा:Fa', ['#अनुप्रेषित [[साँचा:फ़ारसी]]'],
+                           self.templates, self.redirects)
+        ex.define_template('साँचा:फ़ारसी', ['فارسی'],
+                           self.templates, self.redirects)
+        wikitext = 'फ़ारसी ({{Fa}}), एक भाषा है।'
+        extractor = ex.Extractor('1', '1', 'https://x', 'फ़ारसी', [wikitext],
+                                 templates=self.templates, redirects=self.redirects,
+                                 templatePrefix='साँचा:')
+        joined = '\n'.join(extractor.clean_text(wikitext))
+        self.assertNotIn('अनुप्रेषित', joined)
+        self.assertIn('فارسی', joined)
+
+
 class FalsePositiveBoundaryTests(RedirectKeywordsTestCase):
     """The narrow, deliberately-tested false-positive surface: only
     matches at the very start of a template's first line, only as a

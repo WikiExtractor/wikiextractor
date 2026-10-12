@@ -183,7 +183,12 @@ _DEFAULT_KNOWN_NAMESPACES = frozenset(['Template'])
 # way: unrecognized, their bodies were transcluded as text, so an
 # article read "podaljšalo definicijo za približno 1#PREUSMERITEV."
 # where "1×10⁻¹⁰" belonged.
-redirectKeywords = ['REDIRECT', 'PREUSMERITEV', 'چوريو', 'رجوع_مکرر']
+# Hindi has two in use, both seen on hiwiki: lang-family
+# templates are redirects spelled that way, so an article read
+# "फ़ारसी (#अनुप्रेषित), एक भाषा है" where the Persian name in
+# Perso-Arabic script belonged.
+redirectKeywords = ['REDIRECT', 'PREUSMERITEV', 'अनुप्रेषित', 'पुनर्प्रेषित',
+                    'چوريو', 'رجوع_مکرر']
 redirectRE = re.compile(
     r'#(?:%s)\b.*?\[\[([^\]]*)]]' % '|'.join(redirectKeywords),
     re.IGNORECASE)
