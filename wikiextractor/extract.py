@@ -2396,7 +2396,7 @@ def splitParts(paramsList):
     sep = '|'
     parameters = []
     cur = 0
-    for s, e in findMatchingBraces(paramsList):
+    for s, e in _atomicSpans(paramsList):
         par = paramsList[cur:s].split(sep)
         if par:
             if parameters:
@@ -2497,6 +2497,46 @@ def _extensionTagSpans(text):
         position = end
 
 
+def _atomicSpans(text):
+    """Spans of text an argument scan must step over whole.
+
+    A nested call's own separators belong to it, and MediaWiki's
+    preprocessor says the same of an extension tag's contents and of
+    a comment: both become single nodes before any argument is split,
+    so neither a "|" nor an "=" inside one separates anything.
+
+    hiwiki's साँचा:Pp-semi-template is why the tags are here. It picks
+    between a compact and a full padlock notice with
+
+        {{#ifeq: ... | <imagemap>
+         Image:Padlock-silver-medium.svg|20px
+         rect 0 0 1000 1000 [[Wikipedia:Protection policy|...]]
+         desc none
+        </imagemap> | <table>...</table> }}
+
+    and imagemap syntax is "|"-separated. Splitting there cut the
+    branch off after the image name, so </imagemap> never arrived and
+    the element could not be paired up and discarded -- leaving the
+    tag and the image name in the article on every protected page.
+    """
+    spans = list(findMatchingBraces(text))
+    if '<' not in text and '&lt;' not in text:
+        return spans
+    spans.extend(_extensionTagSpans(text))
+    spans.extend(m.span() for m in _COMMENT_SPAN_RE.finditer(text))
+    spans.sort()
+    # An extension tag can hold a brace group and the reverse, so keep
+    # the outermost of any overlapping pair.
+    merged = []
+    for span in spans:
+        if merged and span[0] < merged[-1][1]:
+            if span[1] > merged[-1][1]:
+                merged[-1] = (merged[-1][0], span[1])
+            continue
+        merged.append(span)
+    return merged
+
+
 def splitNamedPart(part):
     """
     Split one part of a template or parser-function call at the "="
@@ -2536,21 +2576,11 @@ def splitNamedPart(part):
     # Nearly every part is a plain "name = value" or a plain word, with
     # nothing to step over; keep those off the scanning path entirely,
     # the same way _expandOperand() keeps them off the expansion path.
-    hasTag = '<' in part or '&lt;' in part
-    if '{' not in part and '[' not in part and not hasTag:
+    if '{' not in part and '[' not in part and '<' not in part \
+            and '&lt;' not in part:
         return part.split('=', 1)
-    spans = list(findMatchingBraces(part))
-    if hasTag:
-        spans.extend(_extensionTagSpans(part))
-        spans.extend(m.span() for m in _COMMENT_SPAN_RE.finditer(part))
-        spans.sort()
     cur = 0
-    for s, e in spans:
-        # A brace group inside an extension tag, or the reverse: the
-        # enclosing span already covers this one.
-        if s < cur:
-            cur = max(cur, e)
-            continue
+    for s, e in _atomicSpans(part):
         i = part.find('=', cur, s)
         if i >= 0:
             return [part[:i], part[i + 1:]]
