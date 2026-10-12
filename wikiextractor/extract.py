@@ -3963,7 +3963,8 @@ def callParserFunction(functionName, args, frame, page_title=None, page_id=None,
 # gap the removed block leaves behind. Not extended to <includeonly>,
 # whose content is always kept either way, so removing just its tags
 # leaves no such gap to begin with.
-reNoinclude = re.compile(r'<noinclude>(?:.*?)</noinclude>\n?', re.DOTALL)
+reNoinclude = re.compile(r'<\s*noinclude\s*>(?:.*?)<\s*/\s*noinclude\s*>\n?',
+                         re.DOTALL | re.IGNORECASE)
 reIncludeonly = re.compile(r'<includeonly>|</includeonly>', re.DOTALL)
 
 
@@ -3997,8 +3998,16 @@ def resolve_template_page(title, page):
     text = unescape(''.join(page))
     text = comment.sub('', text)
     text = reNoinclude.sub('', text)
-    text = re.sub(r'<noinclude\s*>.*$', '', text, flags=re.DOTALL)
-    text = re.sub(r'<noinclude/>\n?', '', text)
+    text = re.sub(r'<\s*noinclude\s*>.*$', '', text,
+                  flags=re.DOTALL | re.IGNORECASE)
+    # A self-closing <noinclude /> is how a template page keeps a
+    # call visible in its own documentation without transcluding
+    # itself: MediaWiki removes the tag when the page is used, so
+    # {{<noinclude />yesno|...}} is a call to Template:yesno.
+    # Whitespace and case vary, and hiwiki writes it with a space,
+    # which is what turned up as a referenced template titled
+    # 'साँचा:<noinclude />yesno' that could never be found.
+    text = re.sub(r'<\s*noinclude\s*/\s*>\n?', '', text, flags=re.IGNORECASE)
 
     onlyincludeAccumulator = ''
     for m in re.finditer(r'<onlyinclude>\n?(.*?)\n?</onlyinclude>', text, re.DOTALL):

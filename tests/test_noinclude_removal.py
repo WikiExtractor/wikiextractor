@@ -155,6 +155,52 @@ class UnmatchedTagFallbackTests(NoincludeTestCase):
         self.assertEqual(result, ["wordword"])
 
 
+class SelfClosingNoincludeTests(NoincludeTestCase):
+    """A self-closing <noinclude /> is removed from a template's
+    stored text, whatever whitespace or case it is written with.
+
+    It is how a template page keeps a call visible in its own
+    documentation without transcluding itself. MediaWiki drops the tag
+    when the page is used, so {{<noinclude />yesno|...}} is a call to
+    Template:yesno. Leaving the tag in place makes the title
+    unresolvable, which showed up on a hiwiki extraction as
+
+        WARNING: 2 referenced title(s) never found in --templates:
+                 ... साँचा:<noinclude />yesno
+
+    and, more quietly, as the template's own output going missing.
+    """
+
+    def stored(self, body):
+        templates, redirects = {}, {}
+        ex.define_template('Template:Probe', [body], templates, redirects)
+        return templates.get('Template:Probe')
+
+    def test_each_spelling_is_removed(self):
+        for tag in ('<noinclude/>', '<noinclude />', '<noinclude  />',
+                    '<NoInclude />', '< noinclude / >'):
+            with self.subTest(tag=tag):
+                self.assertEqual(self.stored('{{%syesno|a}}' % tag),
+                                 '{{yesno|a}}')
+
+    def test_the_call_resolves_through_it(self):
+        templates, redirects = {}, {}
+        ex.define_template('Template:Yesno', ['{{#if:{{{1|}}}|yes|no}}'],
+                           templates, redirects)
+        ex.define_template('Template:Wrap', ['{{<noinclude />Yesno|{{{1|}}}}}'],
+                           templates, redirects)
+        extractor = Extractor(1, "1", "https://x", "Test Article", [],
+                              templates=templates, redirects=redirects,
+                              templatePrefix='Template:')
+        result = '\n'.join(extractor.clean_text('A {{Wrap|x}} B',
+                                                expand_templates=True))
+        self.assertEqual(result, 'A yes B')
+
+    def test_a_matched_pair_is_still_removed_with_odd_spacing(self):
+        self.assertEqual(self.stored('keep< noinclude >drop</ NoInclude >more'),
+                         'keepmore')
+
+
 class OtherDiscardElementsTagsUnaffectedTests(NoincludeTestCase):
     """Sanity check: the fallback stripping is specific to noinclude
     only. Other discardElements tags (e.g. gallery) don't get this
