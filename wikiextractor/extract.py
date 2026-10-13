@@ -3774,15 +3774,68 @@ def sharp_explode(string='', delimiter='', position='0', limit=None, *args):
 # Must stay defined in this module, not a caller's -- sharp_invoke()
 # below reads this as a global, and Python resolves that against the
 # function's own defining module, not wherever it's called from.
+def _langText(*params):
+    """The text of a {{lang}} call: {{lang|<code>|<text>}}."""
+    return params[1] or '' if len(params) > 1 else ''
+
+
+def _xlitText(*params):
+    """The text of a transliteration call, which takes an optional
+    romanization standard between the language code and the text:
+    {{transliteration|<code>|<text>}} or
+    {{transliteration|<code>|<standard>|<text>}}.
+    """
+    given = [p for p in params[1:] if p]
+    return given[-1] if given else ''
+
+
+def _langXxText(*params):
+    """The text of a {{lang-xx}} call, where the language is part of
+    the template name rather than an argument: {{lang-grc|<text>}}."""
+    return params[0] or '' if params else ''
+
+
+# Only minimal support for Lua modules invoked via #invoke, keyed by
+# lowercased module name since a title's first letter is capitalized
+# either way ({{#invoke:Lang}} and {{#invoke:lang}} are one module).
+#
+# Module:Lang is the one that matters most for extracted text, because
+# the templates built on it wrap a term in its own language or script
+# inline, mid-sentence, and there are a great many of them. Without
+# these, enwiki's Altruism reads
+#
+#     selflessness (), love (), kindness (), and forgiveness () are
+#     considered as the highest acts of humanity or " "
+#
+# where {{transliteration|sa|Atmatyag}} and its siblings belong. The
+# rendered page wraps each term in a <span> carrying the language tag,
+# so for plain text the term itself is the whole of it.
 modules = {
     'convert': {
         'convert': lambda x, u, *rest: x + ' ' + u,  # no conversion
-    }
+    },
+    'lang': {
+        'lang': _langText,
+        # {{langx|<code>|<text>|<transliteration>|<gloss>}} renders as
+        # "Ancient Greek: Ἀχιλλεύς, romanized: Achilleús". Only the
+        # term is taken: the language name needs per-language data
+        # nothing here tracks, and joining the romanization and gloss
+        # onto it would mean inventing the punctuation between them.
+        'langx': _langText,
+        'xlit': _xlitText,
+        'transl': _xlitText,
+        'lang_xx_inherit': _langXxText,
+        'lang_xx_italic': _langXxText,
+        'lang_xx_proto': _langXxText,
+    },
+    'wikt-lang': {
+        'wiktlang': _langText,
+    },
 }
 
 
 def sharp_invoke(module, function, frame):
-    functions = modules.get(module)
+    functions = modules.get(module.lower())
     if functions:
         funct = functions.get(function)
         if funct:
