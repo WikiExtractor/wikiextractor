@@ -193,6 +193,78 @@ redirectRE = re.compile(
     r'#(?:%s)\b.*?\[\[([^\]]*)]]' % '|'.join(redirectKeywords),
     re.IGNORECASE)
 
+# The attribute run inside an HTML-style open tag, shared by every tag
+# pattern in this file: any characters up to the tag's first '>'.
+#
+# A '>' ends a tag even inside what looks like a quoted attribute
+# value, which is MediaWiki's own rule. An extension tag (ref,
+# gallery, nowiki, math, ...) ends at a plain scan for the next '>':
+#
+#     // Find end of tag
+#     $tagEndPos = $noMoreGT ? false : strpos( $text, '>', $attrStart );
+#         -- includes/Parser/Preprocessor_Hash.php
+#
+# and an ordinary HTML tag ends by a regex whose attribute run is a
+# bare [^>]*?:
+#
+#     '!^(/?)([A-Za-z][^\t\n\v />\0]*+)([^>]*?)(/?>)([^<]*)$!'
+#         -- Sanitizer::ELEMENT_BITS_REGEX
+#
+# Quotes are read only afterwards, by Sanitizer::decodeTagAttributes,
+# out of the text already cut at that '>'. So <ref style="a > b" />
+# ends between a and b on a wiki too, and the page renders broken.
+#
+# Tracking quote state here instead -- matching a whole "..." run as
+# one unit so an inner '>' does not end the tag -- reads such a tag the
+# way its author meant, but cannot be made safe, because the quoted run
+# has no reliable end. A quote that never closes where the editor
+# intended simply runs to the next quote character in the text, and the
+# tag swallows everything up to whatever '>' follows that. Three real
+# articles, each failing differently:
+#
+#   dewiki Barockmusik -- <ref name="Braun" details="S. 7/>. No '>'
+#   satisfies the open pattern at all, so dropNested() pairs nothing,
+#   the orphan sweep in clean() strips the page's </ref> tags, and all
+#   68 of the article's citations stay in the text with their opening
+#   tags escaped to "&lt;ref" on the way out.
+#
+#   enwiki Abraxas -- <gallery caption="Prints from Bernard de
+#   Montfaucon's "L'antiquite expliquee et representee en figures"
+#   (Band 2,2) page 358 ff.">. The value ends early at the second '"',
+#   and the apostrophe in L'antiquite opens a run whose partner is a
+#   paragraph below. The open tag reaches past the </gallery>, which
+#   then has nothing to pair with, and the file list stays in the
+#   article.
+#
+#   urwiki ابن سینا -- <ref ="la>Nahyan A.G. Fancy (2006), pp. 80-81,
+#   "Pulmonary Transit and Bodily Resurrection", ...  Here the quoted
+#   run is "la>Nahyan A.G. Fancy (2006), pp. 80-81, ": it begins in the
+#   attribute, crosses the tag's real '>', and ends at the quote
+#   opening the citation title. The open tag comes out 256 characters
+#   long, pairs with a far later </ref>, and dropNested() deletes
+#   33,000 characters -- the whole second half of the article, with
+#   nothing in the output to mark the loss.
+#
+# Confining a quoted run to one line, or forbidding '<' inside it,
+# fixes the first two and not the third: the urwiki run is 256
+# characters on a single line with no '<' in it. The only bound that
+# would work is forbidding '>' inside a quoted value, and a quoted
+# value that cannot contain '>' matches exactly what [^>]* matches
+# anyway. So quote state buys nothing here that it can keep.
+#
+# What that costs: <ref style="a > b"> and <br style="a > b" /> are
+# read as ending at their inner '>', leaving ' b">' as text. Both are
+# broken on a wiki in the same way, so the extracted text matches what
+# a reader sees. tests/test_quote_aware_tag_matching.py covers it.
+_TAG_ATTRIBUTES = r'[^>]*'
+
+# An open tag that is NOT self-closing -- the (?<!/) rejects the '/'
+# of <ref name="x" />, which selfClosing_tag_patterns handles instead.
+# Only a '/' immediately before the final '>' is excluded, since an
+# attribute value can legitimately contain one (a ref name such as
+# "geo/18aug2018-1").
+NON_SELF_CLOSING_OPEN_TAG = r'<\s*%s\b' + _TAG_ATTRIBUTES + r'(?<!/)>'
+
 ##
 # Drop these elements from article text
 #
@@ -492,21 +564,10 @@ def clean(extractor, text, expand_templates=False, html_safe=True):
     # Drop discarded elements
     for tag in discardElements:
         close_pattern = r'<\s*/\s*%s\s*>' % tag
-        # [^>]*(?<!/) rather than [^>/]*: attribute values can
-        # legitimately contain a literal '/' (e.g. a ref name like
-        # "geo/18aug2018-1"), so only a '/' immediately before the
-        # final '>' is excluded -- that's a genuine self-closing tag
-        # (already handled separately by selfClosing_tag_patterns
-        # above), not a wrapping open for discardElements to pair up.
-        # (?=(...))\1 emulates an atomic/possessive match for the
-        # quoted alternatives (see lineBreak_tag_pattern above) --
-        # needed here specifically because without it, the (?<!/)
-        # exclusion can force a backtrack that falls back to plain
-        # [^>] matching, wrongly ending at a quoted value's own inner
-        # '>' instead of correctly failing to match a genuine self-
-        # closing tag like <ref style="a > b" />.
-        text = dropNested(text, r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*(?<!/)>''' % tag,
-                           close_pattern)
+        # NON_SELF_CLOSING_OPEN_TAG matches the wrapping open only --
+        # a self-closing <ref name="x" /> is handled by
+        # selfClosing_tag_patterns above and must not be paired here.
+        text = dropNested(text, NON_SELF_CLOSING_OPEN_TAG % tag, close_pattern)
         # dropNested only removes a close tag as part of a matched
         # pair -- an unpaired one (its own open consumed or malformed
         # elsewhere) is left untouched by its pairing logic. So
@@ -1504,14 +1565,12 @@ selfClosing_tag_patterns = [
     # the slash optional would misidentify a real paired tag's opening
     # as self-closing. templatestyles is always self-closing in real
     # usage, so the strict pattern loses nothing there either.
-    # (?=(...))\1 emulates an atomic/possessive match for the quoted
-    # alternatives (see lineBreak_tag_pattern below) -- without it, a
-    # literal '>' inside a quoted attribute value (e.g.
-    # <ref style="a > b" />) would prevent matching at all, since
-    # [^>]* alone stops at that inner '>' and never finds the real,
-    # required trailing '/'.
-    re.compile(r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*/?\s*>''' % tag if tag == 'nobr'
-               else r'''<\s*%s\b(?:(?=("[^"]*"|'[^']*'|[^>]))\1)*/\s*>''' % tag,
+    # _TAG_ATTRIBUTES ends at the tag's first '>', so a '>' inside a
+    # quoted value means the required trailing '/' is never reached
+    # and the tag is not read as self-closing -- the reading MediaWiki
+    # gives it too (see _TAG_ATTRIBUTES).
+    re.compile((r'<\s*%s\b' + _TAG_ATTRIBUTES + r'/?\s*>') % tag if tag == 'nobr'
+               else (r'<\s*%s\b' + _TAG_ATTRIBUTES + r'/\s*>') % tag,
                re.DOTALL | re.IGNORECASE)
     for tag in selfClosingTags
 ]
@@ -1533,27 +1592,15 @@ selfClosing_tag_patterns = [
 # and ~6.6x faster for the larger block_separator_tag_pattern below,
 # with verified identical output on real data either way.
 #
-# Only the opening-tag half needs the group-per-tag naming below: its
-# (?=(...))\1 atomic-group-emulation trick uses a capturing group,
-# and naively joining multiple copies of that trick with '|' breaks
-# it -- confirmed directly: alternative N's own \1, once combined,
-# ends up referring to alternative 0's group (renumbered from that
-# alternative's own local group 1 to the combined pattern's own,
-# different numbering), which never participated in a match where a
-# later alternative is what actually matched, so the backreference
-# silently fails and that entire alternative stops matching anything
-# at all. Named groups (?P<lb0>...)/(?P=lb0), one name per tag, avoid
-# this entirely. The closing-tag half has no groups at all, so it
-# doesn't need this.
+# Neither half contains a group, so the alternatives can be joined
+# directly.
 lineBreak_tag_pattern = re.compile(
     '|'.join(
-        [r'''<\s*%s\b(?:(?=(?P<lb%d>"[^"]*"|'[^']*'|[^>]))(?P=lb%d))*>''' % (tag, i, i)
-         for i, tag in enumerate(lineBreakTags)]
+        [(r'<\s*%s\b' + _TAG_ATTRIBUTES + r'>') % tag for tag in lineBreakTags]
         # br/hr are void elements -- a closing tag is invalid HTML,
         # but a real, if malformed, editing mistake (someone writing
         # </br> as if it needed a matching close, same instinct as
-        # XHTML-style self-closing syntax). No attributes are possible
-        # on a closing tag, so no quote-aware matching is needed here.
+        # XHTML-style self-closing syntax).
         + [r'</\s*%s\s*>' % tag for tag in lineBreakTags]
     ),
     re.DOTALL | re.IGNORECASE)
