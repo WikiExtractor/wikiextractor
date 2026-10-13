@@ -203,6 +203,17 @@ discardElements = [
     'ul', 'li', 'ol', 'dl', 'dt', 'dd', 'menu', 'dir',
     'ref', 'references', 'img', 'imagemap', 'source', 'small',
     'inputbox',
+    # Extension tags whose body is a notation, a program or a data
+    # blob rather than prose: LilyPond for <score>, source code for
+    # <syntaxhighlight> (the modern name for <source>, already
+    # listed), Vega or GeoJSON for <graph>, <mapframe> and <maplink>,
+    # JSON for <templatedata>, CSS for <templatestyles>, and a
+    # character palette or a page-status icon for <charinsert> and
+    # <indicator>. None of it is text a reader sees as part of the
+    # article, and a <score> block runs to dozens of lines of
+    # '\acciaccatura b'8(c-.) d,-.'.
+    'score', 'syntaxhighlight', 'graph', 'mapframe', 'maplink',
+    'templatedata', 'templatestyles', 'charinsert', 'indicator',
     # includeonly is the direct counterpart of noinclude above, and the
     # same reasoning applies: it's a template-specific construct, its
     # content is only ever meant to be visible when the page is
@@ -1369,6 +1380,9 @@ blockSeparatorTags = ('p', 'center', 'h1', 'h2', 'h3', 'h4')
 # These tags are dropped, keeping their content.
 # handle 'a' separately, depending on keepLinks
 ignoredTags = (
+    # <chem>/<ce> wrap a chemical formula that reads as part of the
+    # sentence around it, so the formula stays and only the tags go.
+    'ce', 'chem',
     'abbr', 'b', 'bdi', 'big', 'blockquote', 'cite', 'div', 'em',
     'font', 'hiero', 'i', 'kbd', 'nowiki',
     'plaintext', 'poem',
