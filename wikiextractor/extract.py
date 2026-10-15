@@ -2559,7 +2559,11 @@ def _extensionTagSpans(text):
 
 
 def _atomicSpans(text):
-    """Spans of text an argument scan must step over whole.
+    """Spans of text an argument scan must step over whole, in order.
+
+    Returns an iterable, not necessarily a list: both callers only
+    iterate it, and the common case hands back findMatchingBraces()'
+    own generator so that nothing is built.
 
     A nested call's own separators belong to it, and MediaWiki's
     preprocessor says the same of an extension tag's contents and of
@@ -2580,11 +2584,29 @@ def _atomicSpans(text):
     the element could not be paired up and discarded -- leaving the
     tag and the image name in the article on every protected page.
     """
-    spans = list(findMatchingBraces(text))
+    # Brace groups alone, which is the overwhelming majority of calls,
+    # need nothing built: findMatchingBraces() already yields them in
+    # order and both callers only iterate. Returning its generator
+    # keeps this path as lazy as it was before tags and comments
+    # joined it -- the scan is per argument of every template call, so
+    # a list, a sort and a merge here are paid for on text that has no
+    # tag in it at all.
     if '<' not in text and '&lt;' not in text:
-        return spans
-    spans.extend(_extensionTagSpans(text))
-    spans.extend(m.span() for m in _COMMENT_SPAN_RE.finditer(text))
+        return findMatchingBraces(text)
+    extra = list(_extensionTagSpans(text))
+    # Every comment, escaped or not, contains "!--", so a substring
+    # test settles it before the scan starts. _COMMENT_SPAN_RE opens
+    # with the alternation (?:<|&lt;), which leaves re with no single
+    # literal to seek, so an unguarded finditer walks the argument
+    # character by character looking for a comment that is almost
+    # never in it -- 6.1 us against 0.2 us for the test, on a
+    # 768-character argument.
+    if '!--' in text:
+        extra.extend(m.span() for m in _COMMENT_SPAN_RE.finditer(text))
+    if not extra:
+        return findMatchingBraces(text)
+    spans = list(findMatchingBraces(text))
+    spans.extend(extra)
     spans.sort()
     # An extension tag can hold a brace group and the reverse, so keep
     # the outermost of any overlapping pair.
