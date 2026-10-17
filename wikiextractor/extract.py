@@ -2117,6 +2117,15 @@ class Extractor():
         # original article text.
         wikitext, nowiki_placeholders = _mask_nowiki(wikitext)
 
+        # Same test as findMatchingBraces() makes for itself, taken
+        # here as well because this is its hottest caller by far and
+        # the generator is not worth creating to have it yield
+        # nothing. What follows reduces to the masked text either
+        # way: the loop body never runs, and res picks up all of
+        # wikitext as the leftover.
+        if '{{' not in wikitext:
+            return _unmask_nowiki(wikitext, nowiki_placeholders)
+
         cur = 0
         # look for matching {{...}}
         for s, e in findMatchingBraces(wikitext, 2):
@@ -2739,6 +2748,15 @@ def findMatchingBraces(text, ldelim=0):
     # value outside {0, 2, 3} -- slower, but still correct; every real
     # call site and every direct test call already stays within the
     # cached set, so this path is not expected to actually run.
+    # Nothing here can match without two consecutive '{' or '[', and
+    # most calls arrive with neither. expandTemplates() scans every
+    # argument and every body it expands, so on a real article nine
+    # calls in ten are on a fragment averaging 45 characters with no
+    # brace in it at all. A substring test settles those before any
+    # pattern is looked up.
+    if '{{' not in text and '[[' not in text:
+        return
+
     reOpen, reNext = _BRACE_PATTERNS.get(ldelim) or _build_brace_patterns(ldelim)
 
     cur = 0
