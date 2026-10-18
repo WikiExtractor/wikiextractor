@@ -2113,19 +2113,25 @@ class Extractor():
 
         # logger.debug('<expandTemplates ' + str(len(self.frame)))
 
+        # Same test as findMatchingBraces() makes for itself, taken
+        # here as well because this is its hottest caller by far and
+        # the generator is not worth creating to have it yield
+        # nothing. There is nothing to expand, so the text is its own
+        # result: the loop below would never run and res would pick
+        # up all of wikitext as the leftover.
+        #
+        # Masking runs after this rather than before it. _mask_nowiki()
+        # only ever replaces a <nowiki> span with a token carrying no
+        # brace, so it can remove a "{{" from the text but never add
+        # one -- text without "{{" has none either way, and masking it
+        # only to unmask it again on the way out is work for nothing.
+        if '{{' not in wikitext:
+            return wikitext
+
         # See _mask_nowiki()'s own comment above for why this has to
         # happen here, on every call, rather than once on the
         # original article text.
         wikitext, nowiki_placeholders = _mask_nowiki(wikitext)
-
-        # Same test as findMatchingBraces() makes for itself, taken
-        # here as well because this is its hottest caller by far and
-        # the generator is not worth creating to have it yield
-        # nothing. What follows reduces to the masked text either
-        # way: the loop body never runs, and res picks up all of
-        # wikitext as the leftover.
-        if '{{' not in wikitext:
-            return _unmask_nowiki(wikitext, nowiki_placeholders)
 
         cur = 0
         # look for matching {{...}}
