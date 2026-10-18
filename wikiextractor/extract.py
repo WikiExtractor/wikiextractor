@@ -1746,7 +1746,8 @@ class Template(list):
         # {{ppp|q=r|p=q}} gives r, but using Template:tvvv containing
         # "{{{{{{{{{p}}}}}}}}}", {{tvvv|p=q|q=r|r=s}} gives s.
 
-        logger.debug('subst tpl (%d, %d) %s', len(extractor.frame), depth, self)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug('subst tpl (%d, %d) %s', len(extractor.frame), depth, self)
 
         if depth > extractor.maxParameterRecursionLevels:
             extractor.recursion_exceeded_3_errs += 1
@@ -2288,11 +2289,13 @@ class Extractor():
             # logger.debug('   INVOCATION> %d %s', len(self.frame), body)
             return ''
 
-        logger.debug('INVOCATION %d %s', len(self.frame), body)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug('INVOCATION %d %s', len(self.frame), body)
 
         parts = splitParts(body)
         # title is the portion before the first |
-        logger.debug('TITLE %s', parts[0].strip())
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug('TITLE %s', parts[0].strip())
         title = self.expandTemplates(parts[0].strip())
 
         # SUBST
