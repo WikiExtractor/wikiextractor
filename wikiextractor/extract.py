@@ -807,11 +807,7 @@ def dropNested(text, openDelim, closeDelim):
                 last = end.end()
                 end = closeRE.search(text, end.end())
                 if not end:  # unbalanced
-                    if spans:
-                        span = (spans[0][0], last)
-                    else:
-                        span = (start.start(), last)
-                    spans = [span]
+                    spans.append((start.start(), last))
                     break
             else:
                 spans.append((start.start(), end.end()))
