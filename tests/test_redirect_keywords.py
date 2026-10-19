@@ -249,6 +249,63 @@ class HindiRedirectTests(RedirectKeywordsTestCase):
         self.assertIn('فارسی', joined)
 
 
+class PunjabiShahmukhiRedirectTests(RedirectKeywordsTestCase):
+    """pnbwiki spells it "مڑجوڑ", which is not Urdu's "رجوع_مکرر"
+    even though the two wikis share a script.
+
+    This one empties articles outright rather than corrupting a
+    phrase. The leaked keyword arrives at the head of the article's
+    first line, since the template whose body leaks is called before
+    any prose and the lead sentence continues on that same line. A
+    line starting with '#' is a list item to compact(), which drops
+    it -- so the lead paragraph goes too, and an article whose only
+    prose is its lead extracts to nothing at all.
+
+    Found by auditing the empty documents of a full pnbwiki
+    extraction: "لاورن کاکس" (id 76804), "غنا علی" (id 64362),
+    "عائشہ فاروق" (id 62180) and "ابھینا اہیر" (id 62251) are four of
+    them, each an empty document whose expanded text began "#مڑجوڑ".
+    """
+
+    def test_punjabi_redirect_keyword(self):
+        ex.define_template('سانچہ:Infobox person',
+                           ['#مڑجوڑ [[سانچہ:خانہ معلومات شخصیت]]'],
+                           self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('سانچہ:Infobox person'),
+                         'سانچہ:خانہ معلومات شخصیت')
+        self.assertNotIn('سانچہ:Infobox person', self.templates)
+
+    def test_real_world_case_article_is_no_longer_empty(self):
+        # The target template exists but renders to nothing, which is
+        # the common shape; what matters is that the redirect resolves
+        # instead of its body being transcluded as text.
+        ex.define_template('سانچہ:Infobox person',
+                           ['#مڑجوڑ [[سانچہ:خانہ معلومات شخصیت]]'],
+                           self.templates, self.redirects)
+        ex.define_template('سانچہ:خانہ معلومات شخصیت', [''],
+                           self.templates, self.redirects)
+
+        wikitext = ("{{Infobox person|name=Laverne}}'''لاویرن کوکس''' "
+                    "اک امریکی اداکارہ اتے ایڈووکیٹ اے۔")
+        extractor = ex.Extractor('1', '1', 'https://x', 'لاورن کاکس',
+                                 [wikitext], templates=self.templates,
+                                 redirects=self.redirects,
+                                 templatePrefix='سانچہ:')
+        joined = '\n'.join(extractor.clean_text(wikitext))
+        self.assertNotIn('مڑجوڑ', joined)
+        self.assertIn('لاویرن کوکس', joined)
+
+    def test_the_two_perso_arabic_spellings_are_both_recognized(self):
+        # Guards against the two being treated as interchangeable:
+        # each wiki's own spelling needs its own entry.
+        ex.define_template('سانچہ:Foo', ['#مڑجوڑ [[سانچہ:Bar]]'],
+                           self.templates, self.redirects)
+        ex.define_template('سانچہ:Baz', ['#رجوع_مکرر [[سانچہ:Qux]]'],
+                           self.templates, self.redirects)
+        self.assertEqual(self.redirects.get('سانچہ:Foo'), 'سانچہ:Bar')
+        self.assertEqual(self.redirects.get('سانچہ:Baz'), 'سانچہ:Qux')
+
+
 class FalsePositiveBoundaryTests(RedirectKeywordsTestCase):
     """The narrow, deliberately-tested false-positive surface: only
     matches at the very start of a template's first line, only as a

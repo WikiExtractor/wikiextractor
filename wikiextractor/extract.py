@@ -187,8 +187,17 @@ _DEFAULT_KNOWN_NAMESPACES = frozenset(['Template'])
 # templates are redirects spelled that way, so an article read
 # "फ़ारसी (#अनुप्रेषित), एक भाषा है" where the Persian name in
 # Perso-Arabic script belonged.
+# Shahmukhi Punjabi spells it "مڑجوڑ", distinct from Urdu's
+# "رجوع_مکرر" despite the shared script. On pnbwiki the leaked
+# keyword lands at the very start of an article's first line -- the
+# transcluded body begins with it and the article's own lead follows
+# on that same line -- and compact() reads a leading '#' as a list
+# item and drops the line, taking the lead paragraph with it. Where
+# that lead is the article's only prose, the article extracts to an
+# empty document: "لاورن کاکس" (id 76804), "غنا علی" (id 64362) and
+# "عائشہ فاروق" (id 62180) are three of them.
 redirectKeywords = ['REDIRECT', 'PREUSMERITEV', 'अनुप्रेषित', 'पुनर्प्रेषित',
-                    'چوريو', 'رجوع_مکرر']
+                    'چوريو', 'رجوع_مکرر', 'مڑجوڑ']
 redirectRE = re.compile(
     r'#(?:%s)\b.*?\[\[([^\]]*)]]' % '|'.join(redirectKeywords),
     re.IGNORECASE)
