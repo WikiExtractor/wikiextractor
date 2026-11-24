@@ -343,20 +343,30 @@ class StreamingTemplateBlobBuilder:
         """Returns (records_bytes, titles_bytes, content_bytes), the
         same shape build_template_blobs() returns -- pass straight
         into compact_blobs()."""
-        content_blob = b''.join(self._content_parts)
-        self._content_parts = None  # let the (now-redundant) parts list go
+        from io import BytesIO
 
-        title_parts = []
+        content = BytesIO()
+        part_count = len(self._content_parts)
+        self._content_parts.reverse()
+        for _ in range(part_count):
+            content.write(self._content_parts.pop())
+        self._content_parts = None  # let the (now-redundant) parts list go
+        content_blob = content.getvalue()
+
+        titles = BytesIO()
         title_offset = 0
-        records = []
-        for title, c_off, c_len in sorted(self._metadata, key=lambda t: t[0]):
+        records = BytesIO()
+        self._metadata.sort(key=lambda t: t[0])
+        self._metadata.reverse()
+        while self._metadata:
+            title, c_off, c_len = self._metadata.pop()
             encoded_title = title.encode('utf-8')
-            records.append(struct.pack(RECORD_FORMAT, title_offset, len(encoded_title), c_off, c_len))
-            title_parts.append(encoded_title)
+            records.write(struct.pack(RECORD_FORMAT, title_offset, len(encoded_title), c_off, c_len))
+            titles.write(encoded_title)
             title_offset += len(encoded_title)
         self._metadata = None
-        titles_blob = b''.join(title_parts)
-        records_blob = b''.join(records)
+        titles_blob = titles.getvalue()
+        records_blob = records.getvalue()
 
         return records_blob, titles_blob, content_blob
 
